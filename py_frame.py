@@ -8,10 +8,13 @@ from typing import List, Tuple, Literal, Optional
 import pygame
 from PIL import Image, ExifTags, ImageOps
 import random
+from threading import Lock, Thread
+from typing import Optional
+from web_server import run_web
 
 Orientation = Literal["P", "L"]  # P = Portrait, L = Landscape
 
-seconds_to_display = 10
+seconds_to_display = 3
 
 
 # ============================================================
@@ -35,6 +38,27 @@ for k, v in ExifTags.TAGS.items():
     if v == "Orientation":
         EXIF_ORIENTATION_TAG = k
         break
+
+
+class SlideshowController:
+    def __init__(self):
+        self.lock = Lock()
+        # Current screen
+        self.current_slides: list[Slide] = []
+        self.current_pattern_type: Optional[int] = None  # 0=single L, 1/2/3 = PPP / PPLLL / PLLL
+        self.current_marks: set[int] = set()  # indices 0..4 marked for exclusion
+
+        # History of screens (for back/forward)
+        # each entry: (slides, pattern_type)
+        self.history: list[tuple[list[Slide], int]] = []
+        self.history_index: int = -1  # -1 means “no history yet”
+
+        # Remote command: {"type": "next"|"prev", "steps": int}
+        self.pending_command: Optional[dict] = None
+
+        # Exclusions
+        self.excluded_paths: set[str] = set()
+        self.exclusions_file: str = "exclusions.txt"
 
 
 def make_old_paper_surface(size):
@@ -163,33 +187,30 @@ def extract_pattern_from_deque(dq: deque[Slide]) -> Tuple[List[Slide], int]:
 # ============================================================
 
 def image_fetcher_thread(
-        file_paths: List[str],
+        file_paths: list[str],
         dq: deque[Slide],
         lock: threading.Lock,
         not_full: threading.Condition,
-        producer_done: threading.Event,  # kept for compatibility, but no longer used
+        producer_done: threading.Event,
+        controller: SlideshowController,
         max_size: int = 5,
 ):
-    """
-    Producer: endlessly cycles over file_paths, filling dq up to max_size.
-    Starts from whatever order file_paths already has (which we rotated randomly).
-    """
     try:
         if not file_paths:
-            # Nothing to do; just signal done (optional)
             producer_done.set()
             return
 
         idx = 0
         n = len(file_paths)
 
-        while True:  # 👉 infinite loop = infinite slideshow
+        while True:
             path = file_paths[idx]
-
-            # Move to next index (wrap around)
             idx = (idx + 1) % n
 
-            # Wait for space in deque
+            with controller.lock:
+                if path in controller.excluded_paths:
+                    continue
+
             with not_full:
                 while len(dq) >= max_size:
                     not_full.wait()
@@ -197,7 +218,6 @@ def image_fetcher_thread(
             try:
                 slide = load_slide(path)
             except Exception as e:
-                # If an image fails to load, skip it
                 print(f"Failed to load {path}: {e}")
                 continue
 
@@ -206,7 +226,6 @@ def image_fetcher_thread(
                 not_full.notify_all()
 
     finally:
-        # In practice we never reach here, but keep for symmetry
         producer_done.set()
 
 
@@ -238,14 +257,34 @@ def blit_scaled(surface: pygame.Surface, img: pygame.Surface, target_rect: pygam
         return
 
     scale = min(tw / iw, th / ih)
-    new_w = int(iw * scale)
-    new_h = int(ih * scale)
+    new_w = max(1, int(iw * scale))
+    new_h = max(1, int(ih * scale))
 
     scaled = smoothscale_safe(img, (new_w, new_h))
 
     x = target_rect.x + (tw - new_w) // 2
     y = target_rect.y + (th - new_h) // 2
     surface.blit(scaled, (x, y))
+
+
+def draw_slot_overlay(screen: pygame.Surface,
+                      rect: pygame.Rect,
+                      slot_index: int,
+                      marked: bool,
+                      font: pygame.font.Font):
+    # border color
+    color = (255, 64, 64) if marked else (240, 240, 240)
+    pygame.draw.rect(screen, color, rect, 3)
+
+    # label box top-left
+    label = str(slot_index + 1)
+    text_surf = font.render(label, True, (0, 0, 0))
+    padding = 4
+    box_w = text_surf.get_width() + 2 * padding
+    box_h = text_surf.get_height() + 2 * padding
+    box_rect = pygame.Rect(rect.x + 8, rect.y + 8, box_w, box_h)
+    pygame.draw.rect(screen, color, box_rect)
+    screen.blit(text_surf, (box_rect.x + padding, box_rect.y + padding))
 
 
 OLD_PAPER = (235, 222, 193)  # warm beige
@@ -297,88 +336,31 @@ def build_blurred_background(screen_size, slide_rects):
     return blurred
 
 
-def render_single_landscape(screen: pygame.Surface, slide: Slide, background: pygame.Surface):
+def render_single_landscape(screen: pygame.Surface,
+                            slide: Slide,
+                            background: Optional[pygame.Surface],
+                            font: pygame.font.Font,
+                            marks: set[int]):
     if background is not None:
         screen.blit(background, (0, 0))
     else:
-        screen.fill(OLD_PAPER)
+        screen.fill((0, 0, 0))
+
     rect = screen.get_rect()
     blit_scaled(screen, slide.surface, rect)
 
+    # slot index 0 always
+    draw_slot_overlay(screen, rect, 0, (0 in marks), font)
 
-def render_pattern(screen: pygame.Surface, slides: List[Slide], pattern_type: int, background: pygame.Surface):
+
+def compute_pattern_rects(screen: pygame.Surface, slides: List[Slide], pattern_type: int) -> List[
+    tuple[pygame.Surface, pygame.Rect]]:
     """
     Render slides according to pattern type:
       1: PPP   -> 3 portrait images side-by-side, full screen (3 columns)
       2: PPLLL -> Column 1: 3 L stacked; Column 2 & 3: 2 P full-height
       3: PLLL  -> Column 3: P full-height; Columns 1-2: top L spans both,
                               bottom two L's share the bottom half (one in col1, one in col2)
-    """
-    if background is not None:
-        screen.blit(background, (0, 0))
-    else:
-        screen.fill(OLD_PAPER)
-
-    W, H = screen.get_width(), screen.get_height()
-    col_w = W // 3
-
-    if pattern_type == 1:
-        # PPP: 3 images → columns 0,1,2 full-height
-        for idx, slide in enumerate(slides[:3]):
-            rect = pygame.Rect(idx * col_w, 0, col_w, H)
-            blit_scaled(screen, slide.surface, rect)
-
-    elif pattern_type == 2:
-        # PPLLL: we should have 2 P and 3 L in slides
-        Ls = [s for s in slides if s.orientation == "L"]
-        Ps = [s for s in slides if s.orientation == "P"]
-
-        # Column 1: 3 L stacked
-        if len(Ls) >= 3:
-            h3 = H // 3
-            for i in range(3):
-                rect = pygame.Rect(0, i * h3, col_w, h3 if i < 2 else H - 2 * h3)
-                blit_scaled(screen, Ls[i].surface, rect)
-
-        # Columns 2 & 3: 2 P full-height
-        if len(Ps) >= 1:
-            rect = pygame.Rect(col_w, 0, col_w, H)
-            blit_scaled(screen, Ps[0].surface, rect)
-        if len(Ps) >= 2:
-            rect = pygame.Rect(2 * col_w, 0, col_w, H)
-            blit_scaled(screen, Ps[1].surface, rect)
-
-    elif pattern_type == 3:
-        # PLLL: 1 P, 3 L
-        Ls = [s for s in slides if s.orientation == "L"]
-        Ps = [s for s in slides if s.orientation == "P"]
-        if not Ps or len(Ls) < 1:
-            return
-
-        # Column 3: P full-height
-        rect_p = pygame.Rect(2 * col_w, 0, col_w, H)
-        blit_scaled(screen, Ps[0].surface, rect_p)
-
-        # Top L spans columns 1+2 (width = 2 * col_w), top half of screen
-        top_L = Ls[0]
-        rect_top = pygame.Rect(0, 0, 2 * col_w, H // 2)
-        blit_scaled(screen, top_L.surface, rect_top)
-
-        # Remaining 2 Ls (if present) in bottom half, columns 1 and 2
-        if len(Ls) >= 2:
-            rect_bottom_left = pygame.Rect(0, H // 2, col_w, H // 2)
-            blit_scaled(screen, Ls[1].surface, rect_bottom_left)
-        if len(Ls) >= 3:
-            rect_bottom_right = pygame.Rect(col_w, H // 2, col_w, H // 2)
-            blit_scaled(screen, Ls[2].surface, rect_bottom_right)
-
-
-def compute_pattern_rects(screen: pygame.Surface, slides: List[Slide], pattern_type: int) -> List[
-    tuple[pygame.Surface, pygame.Rect]]:
-    """
-    Compute rects for each slide according to pattern_type (1,2,3),
-    matching your render_pattern layout.
-    Returns list of (surface, rect).
     """
     W, H = screen.get_width(), screen.get_height()
     col_w = W // 3
@@ -435,88 +417,202 @@ def compute_pattern_rects(screen: pygame.Surface, slides: List[Slide], pattern_t
     return rects
 
 
-# ============================================================
-# Render loop (consumer)
-# ============================================================
+def render_pattern(screen: pygame.Surface,
+                   slides: list[Slide],
+                   pattern_type: int,
+                   background: Optional[pygame.Surface],
+                   font: pygame.font.Font,
+                   marks: set[int]):
+    if background is not None:
+        screen.blit(background, (0, 0))
+    else:
+        screen.fill((0, 0, 0))
+
+    rects = compute_pattern_rects(screen, slides, pattern_type)
+
+    for idx, (surf, rect) in enumerate(rects):
+        blit_scaled(screen, surf, rect)
+        draw_slot_overlay(screen, rect, idx, (idx in marks), font)
+
+
+def finalize_exclusions(controller: SlideshowController):
+    """Write current_marks from current_slides to exclusions file and set."""
+    if not controller.current_slides:
+        controller.current_marks.clear()
+        return
+
+    with controller.lock:
+        marked_indices = list(controller.current_marks)
+        controller.current_marks.clear()
+
+    if not marked_indices:
+        return
+
+    new_paths = []
+    for i in marked_indices:
+        if 0 <= i < len(controller.current_slides):
+            path = controller.current_slides[i].path
+            if path not in controller.excluded_paths:
+                controller.excluded_paths.add(path)
+                new_paths.append(path)
+
+    if new_paths:
+        with open(controller.exclusions_file, "a") as f:
+            for p in new_paths:
+                f.write(p + "\n")
+
 
 def render_loop(
         dq: deque[Slide],
         lock: threading.Lock,
         not_full: threading.Condition,
         producer_done: threading.Event,
+        controller: SlideshowController,
+        seconds_to_display: int = 15,
 ):
     pygame.init()
     screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
     pygame.mouse.set_visible(False)
     clock = pygame.time.Clock()
+    font = pygame.font.SysFont(None, 40)
 
-    current_slides: List[Slide] = []
-    current_pattern_type: Optional[int] = None  # 0 for single landscape
+    current_slides: list[Slide] = []
+    current_pattern_type: Optional[int] = None
+    current_background: Optional[pygame.Surface] = None
     current_end_time: float = 0.0
-    current_background: Optional[pygame.Surface] = None  # ✅ persist across frames
 
     running = True
     while running:
         now = time.time()
 
-        # Handle events (ESC/close)
         for event in pygame.event.get():
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 running = False
             elif event.type == pygame.QUIT:
                 running = False
 
-        # Decide if we need to load a new image / pattern
-        if (not current_slides) or (now >= current_end_time):
-            # Get new stuff if available
-            with not_full:
-                # If deque empty and producer done -> we're done
-                if len(dq) == 0 and producer_done.is_set():
-                    running = False
+        # Take any pending command from web
+        with controller.lock:
+            cmd = controller.pending_command
+            controller.pending_command = None
 
-                elif len(dq) >= 5:
-                    # We have enough to safely run pattern logic
-                    first = dq[0]
-                    if first.orientation == "L":
-                        # Single landscape fullscreen
-                        slide = dq.popleft()
-                        not_full.notify_all()
-                        current_slides = [slide]
-                        current_pattern_type = 0  # single landscape
-                        current_end_time = now + seconds_to_display
+        force_next = False
+        force_prev = False
+        steps = 1
+        if cmd:
+            if cmd["type"] == "next":
+                force_next = True
+            elif cmd["type"] == "prev":
+                force_prev = True
+            steps = max(1, int(cmd.get("steps", 1)))
 
-                        # Build background for this single image
-                        screen_size = screen.get_size()
-                        rect = screen.get_rect()
-                        current_background = build_blurred_background(
-                            screen_size,
-                            [(slide.surface, rect)]
-                        )
+        # Decide if we need new screen
+        need_advance = False
+        backward = False
+
+        if force_prev:
+            need_advance = True
+            backward = True
+        elif force_next:
+            need_advance = True
+            backward = False
+        elif (not current_slides) or (now >= current_end_time):
+            need_advance = True
+            backward = False
+
+        if need_advance:
+            # finalize exclusions for current screen
+            finalize_exclusions(controller)
+
+            if backward:
+                # move back in history
+                with controller.lock:
+                    if controller.history:
+                        controller.history_index = max(0, controller.history_index - steps
+                        if controller.history_index >= 0
+                        else len(controller.history) - 1 - steps)
+                        idx = controller.history_index
+                        slides, ptype = controller.history[idx]
                     else:
-                        # Portrait: use pattern extraction
-                        slides, ptype = extract_pattern_from_deque(dq)
-                        not_full.notify_all()
-                        current_slides = slides
-                        current_pattern_type = ptype
-                        current_end_time = now + seconds_to_display
-
-                        # ✅ Build background for this pattern
+                        slides, ptype = [], None
+                current_slides = slides
+                current_pattern_type = ptype
+                if current_slides and current_pattern_type is not None:
+                    if current_pattern_type == 0:
+                        rects = [(current_slides[0].surface, screen.get_rect())]
+                    else:
                         rects = compute_pattern_rects(screen, current_slides, current_pattern_type)
-                        current_background = build_blurred_background(
-                            screen.get_size(),
-                            rects
-                        )
-                else:
-                    # Less than 5 images – keep showing previous slides if any
-                    # (do nothing, current_slides and current_background remain)
-                    pass
+                    current_background = build_blurred_background(screen.get_size(), rects)
+                    current_end_time = now + seconds_to_display
+                continue  # rendering at bottom
 
-        # Render current slides if any
-        if current_slides:
-            if current_pattern_type == 0:
-                render_single_landscape(screen, current_slides[0], current_background)
+            # Forward: history-forward or new from deque
+            with controller.lock:
+                hist_len = len(controller.history)
+                idx = controller.history_index
+
+            used_history = False
+            if hist_len > 0 and 0 <= idx < hist_len - 1:
+                # forward in history
+                new_index = min(hist_len - 1, idx + steps)
+                with controller.lock:
+                    controller.history_index = new_index
+                    slides, ptype = controller.history[new_index]
+                current_slides = slides
+                current_pattern_type = ptype
+                used_history = True
             else:
-                render_pattern(screen, current_slides, current_pattern_type, current_background)
+                # need a brand new screen from deque
+                with not_full:
+                    if len(dq) == 0 and producer_done.is_set():
+                        running = False
+                    elif len(dq) >= 5:
+                        first = dq[0]
+                        if first.orientation == "L":
+                            slide = dq.popleft()
+                            not_full.notify_all()
+                            current_slides = [slide]
+                            current_pattern_type = 0
+                        else:
+                            slides, ptype = extract_pattern_from_deque(dq)
+                            not_full.notify_all()
+                            current_slides = slides
+                            current_pattern_type = ptype
+                    else:
+                        # not enough images -> keep current screen
+                        pass
+
+                if current_slides and current_pattern_type is not None:
+                    with controller.lock:
+                        controller.history.append((current_slides, current_pattern_type))
+                        controller.history_index = len(controller.history) - 1
+
+            # Build background for current screen
+            if current_slides and current_pattern_type is not None:
+                if current_pattern_type == 0:
+                    rects = [(current_slides[0].surface, screen.get_rect())]
+                else:
+                    rects = compute_pattern_rects(screen, current_slides, current_pattern_type)
+                current_background = build_blurred_background(screen.get_size(), rects)
+                current_end_time = now + seconds_to_display
+
+            # Update controller current_slides/pattern for web/state
+            with controller.lock:
+                controller.current_slides = current_slides
+                controller.current_pattern_type = current_pattern_type
+
+        # Render current screen
+        if current_slides and current_pattern_type is not None:
+            with controller.lock:
+                marks_copy = set(controller.current_marks)
+
+            if current_pattern_type == 0:
+                render_single_landscape(screen, current_slides[0],
+                                        current_background, font, marks_copy)
+            else:
+                render_pattern(screen, current_slides,
+                               current_pattern_type, current_background,
+                               font, marks_copy)
 
         pygame.display.flip()
         clock.tick(30)
@@ -599,7 +695,6 @@ def test_extract_pattern_all_len5():
 # ============================================================
 
 
-
 def read_file_list(list_path: str) -> List[str]:
     paths: List[str] = []
     with open(list_path, "r") as f:
@@ -628,6 +723,8 @@ def main():
         print("Usage: python slideshow.py file_list.txt")
         sys.exit(1)
 
+    controller = SlideshowController()
+
     list_path = sys.argv[1]
     file_paths = read_file_list(list_path)
 
@@ -636,19 +733,23 @@ def main():
     not_full = threading.Condition(lock)
     producer_done = threading.Event()
 
+    # start web server in background
+    web_thread = Thread(target=run_web, args=(controller,), daemon=True)
+    web_thread.start()
+
     # Start fetcher thread
     fetcher = threading.Thread(
         target=image_fetcher_thread,
-        args=(file_paths, shared_deque, lock, not_full, producer_done, 5),
+        args=(file_paths, shared_deque, lock, not_full, producer_done, controller, 5),
         daemon=True,
     )
     fetcher.start()
 
     # Optional: run pattern tests (for logic sanity)
-    test_extract_pattern_all_len5()
+    # test_extract_pattern_all_len5()
 
     # Start render loop in main thread
-    render_loop(shared_deque, lock, not_full, producer_done)
+    render_loop(shared_deque, lock, not_full, producer_done, controller, seconds_to_display)
 
 
 if __name__ == "__main__":
