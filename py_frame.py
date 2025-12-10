@@ -14,7 +14,7 @@ from web_server import run_web
 
 Orientation = Literal["P", "L"]  # P = Portrait, L = Landscape
 
-seconds_to_display = 3
+seconds_to_display = 15
 
 
 # ============================================================
@@ -272,8 +272,10 @@ def draw_slot_overlay(screen: pygame.Surface,
                       slot_index: int,
                       marked: bool,
                       font: pygame.font.Font):
+    OLD_PAPER = (235, 222, 193)  # warm beige
+    RED = (255, 64, 64)
     # border color
-    color = (255, 64, 64) if marked else (240, 240, 240)
+    color = RED if marked else OLD_PAPER
     pygame.draw.rect(screen, color, rect, 3)
 
     # label box top-left
@@ -285,10 +287,6 @@ def draw_slot_overlay(screen: pygame.Surface,
     box_rect = pygame.Rect(rect.x + 8, rect.y + 8, box_w, box_h)
     pygame.draw.rect(screen, color, box_rect)
     screen.blit(text_surf, (box_rect.x + padding, box_rect.y + padding))
-
-
-OLD_PAPER = (235, 222, 193)  # warm beige
-
 
 def build_blurred_background(screen_size, slide_rects):
     """
