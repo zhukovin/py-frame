@@ -21,7 +21,8 @@ def create_app(controller: "SlideshowController") -> Flask:
                 }
                 for i, s in enumerate(controller.current_slides)
             ]
-        return jsonify({"slides": slides})
+            paused = controller.paused
+        return jsonify({"slides": slides, "paused": paused})
 
     @app.route("/api/mark", methods=["POST"])
     def api_mark():
@@ -43,17 +44,19 @@ def create_app(controller: "SlideshowController") -> Flask:
         cmd = data.get("cmd")
         steps = int(data.get("steps", 1))
 
-        if cmd not in ("next", "prev"):
+        if cmd not in ("next", "prev", "pause", "play"):
             return jsonify({"ok": False, "error": "bad cmd"}), 400
 
         with controller.lock:
-            controller.pending_command = {"type": cmd, "steps": steps}
+            if cmd in ("pause", "play"):
+                controller.pending_command = {"type": cmd}
+            else:
+                controller.pending_command = {"type": cmd, "steps": steps}
 
         return jsonify({"ok": True})
 
     @app.route("/")
     def index():
-        # super simple phone UI
         return """
 <!DOCTYPE html>
 <html>
@@ -71,7 +74,10 @@ def create_app(controller: "SlideshowController") -> Flask:
   <div>
     <button onclick="sendCommand('prev', 1)">&laquo; Prev</button>
     <button onclick="sendCommand('next', 1)">Next &raquo;</button>
+    <button onclick="sendCommand('pause')">Pause</button>
+    <button onclick="sendCommand('play')">Play</button>
   </div>
+  <div id="status"></div>
   <div id="slots"></div>
 
 <script>
@@ -79,6 +85,10 @@ async function refreshState() {
   const res = await fetch('/api/state');
   const data = await res.json();
   const slotsDiv = document.getElementById('slots');
+  const statusDiv = document.getElementById('status');
+
+  statusDiv.textContent = data.paused ? "Status: PAUSED" : "Status: PLAYING";
+
   slotsDiv.innerHTML = '';
   data.slides.forEach(slide => {
     const div = document.createElement('div');
@@ -104,10 +114,14 @@ async function toggleMark(slot) {
 }
 
 async function sendCommand(cmd, steps) {
+  const body = { cmd };
+  if (steps !== undefined) {
+    body.steps = steps;
+  }
   await fetch('/api/command', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({cmd, steps})
+    body: JSON.stringify(body)
   });
   setTimeout(refreshState, 800);
 }

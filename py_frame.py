@@ -14,7 +14,7 @@ from web_server import run_web
 
 Orientation = Literal["P", "L"]  # P = Portrait, L = Landscape
 
-seconds_to_display = 15
+seconds_to_display = 3
 
 
 # ============================================================
@@ -45,20 +45,22 @@ class SlideshowController:
         self.lock = Lock()
         # Current screen
         self.current_slides: list[Slide] = []
-        self.current_pattern_type: Optional[int] = None  # 0=single L, 1/2/3 = PPP / PPLLL / PLLL
-        self.current_marks: set[int] = set()  # indices 0..4 marked for exclusion
+        self.current_pattern_type: Optional[int] = None
+        self.current_marks: set[int] = set()
 
-        # History of screens (for back/forward)
-        # each entry: (slides, pattern_type)
+        # History
         self.history: list[tuple[list[Slide], int]] = []
-        self.history_index: int = -1  # -1 means “no history yet”
+        self.history_index: int = -1
 
-        # Remote command: {"type": "next"|"prev", "steps": int}
+        # Pending command from web: {"type": "...", "steps": int}
         self.pending_command: Optional[dict] = None
 
         # Exclusions
         self.excluded_paths: set[str] = set()
         self.exclusions_file: str = "exclusions.txt"
+
+        # 👉 New: paused state
+        self.paused: bool = False
 
 
 def make_old_paper_surface(size):
@@ -475,7 +477,7 @@ def render_loop(
     font = pygame.font.SysFont(None, 40)
 
     current_slides: list[Slide] = []
-    current_pattern_type: Optional[int] = None
+    current_pattern_type: Optional[int] = None  # 0 = single L, 1/2/3 = PPP/PPLLL/PLLL
     current_background: Optional[pygame.Surface] = None
     current_end_time: float = 0.0
 
@@ -483,28 +485,41 @@ def render_loop(
     while running:
         now = time.time()
 
+        # Handle local events (ESC / close)
         for event in pygame.event.get():
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 running = False
             elif event.type == pygame.QUIT:
                 running = False
 
-        # Take any pending command from web
+        # --- Take any pending command and paused state from web/controller ---
         with controller.lock:
             cmd = controller.pending_command
             controller.pending_command = None
+            paused = controller.paused
 
         force_next = False
         force_prev = False
         steps = 1
-        if cmd:
-            if cmd["type"] == "next":
-                force_next = True
-            elif cmd["type"] == "prev":
-                force_prev = True
-            steps = max(1, int(cmd.get("steps", 1)))
 
-        # Decide if we need new screen
+        if cmd:
+            ctype = cmd.get("type")
+            if ctype == "next":
+                force_next = True
+                steps = max(1, int(cmd.get("steps", 1)))
+            elif ctype == "prev":
+                force_prev = True
+                steps = max(1, int(cmd.get("steps", 1)))
+            elif ctype == "pause":
+                with controller.lock:
+                    controller.paused = True
+                paused = True
+            elif ctype == "play":
+                with controller.lock:
+                    controller.paused = False
+                paused = False
+
+        # --- Decide if we need a new screen ---
         need_advance = False
         backward = False
 
@@ -514,37 +529,50 @@ def render_loop(
         elif force_next:
             need_advance = True
             backward = False
-        elif (not current_slides) or (now >= current_end_time):
+        elif (not current_slides) or (now >= current_end_time and not paused):
+            # Auto-advance only if not paused
             need_advance = True
             backward = False
 
         if need_advance:
-            # finalize exclusions for current screen
+            # finalize exclusions for the screen we're leaving
             finalize_exclusions(controller)
 
             if backward:
-                # move back in history
+                # --- Move back in history ---
                 with controller.lock:
                     if controller.history:
-                        controller.history_index = max(0, controller.history_index - steps
-                        if controller.history_index >= 0
-                        else len(controller.history) - 1 - steps)
+                        controller.history_index = max(
+                            0,
+                            controller.history_index - steps
+                            if controller.history_index >= 0
+                            else len(controller.history) - 1 - steps,
+                        )
                         idx = controller.history_index
                         slides, ptype = controller.history[idx]
                     else:
                         slides, ptype = [], None
+
                 current_slides = slides
                 current_pattern_type = ptype
+
                 if current_slides and current_pattern_type is not None:
                     if current_pattern_type == 0:
                         rects = [(current_slides[0].surface, screen.get_rect())]
                     else:
                         rects = compute_pattern_rects(screen, current_slides, current_pattern_type)
-                    current_background = build_blurred_background(screen.get_size(), rects)
-                    current_end_time = now + seconds_to_display
-                continue  # rendering at bottom
 
-            # Forward: history-forward or new from deque
+                    # blurred background based on layout rects
+                    current_background = build_blurred_background(
+                        screen.get_size(),
+                        rects
+                    )
+                    current_end_time = now + seconds_to_display
+
+                # skip to rendering
+                continue
+
+            # --- Forward: history forward or new from deque ---
             with controller.lock:
                 hist_len = len(controller.history)
                 idx = controller.history_index
@@ -570,7 +598,7 @@ def render_loop(
                             slide = dq.popleft()
                             not_full.notify_all()
                             current_slides = [slide]
-                            current_pattern_type = 0
+                            current_pattern_type = 0  # single landscape
                         else:
                             slides, ptype = extract_pattern_from_deque(dq)
                             not_full.notify_all()
@@ -585,13 +613,17 @@ def render_loop(
                         controller.history.append((current_slides, current_pattern_type))
                         controller.history_index = len(controller.history) - 1
 
-            # Build background for current screen
+            # --- Build background for current screen ---
             if current_slides and current_pattern_type is not None:
                 if current_pattern_type == 0:
                     rects = [(current_slides[0].surface, screen.get_rect())]
                 else:
                     rects = compute_pattern_rects(screen, current_slides, current_pattern_type)
-                current_background = build_blurred_background(screen.get_size(), rects)
+
+                current_background = build_blurred_background(
+                    screen.get_size(),
+                    rects
+                )
                 current_end_time = now + seconds_to_display
 
             # Update controller current_slides/pattern for web/state
@@ -599,21 +631,32 @@ def render_loop(
                 controller.current_slides = current_slides
                 controller.current_pattern_type = current_pattern_type
 
-        # Render current screen
+        # --- Render current screen (uses your aspect-ratio-preserving renderers) ---
         if current_slides and current_pattern_type is not None:
             with controller.lock:
                 marks_copy = set(controller.current_marks)
 
             if current_pattern_type == 0:
-                render_single_landscape(screen, current_slides[0],
-                                        current_background, font, marks_copy)
+                render_single_landscape(
+                    screen,
+                    current_slides[0],
+                    current_background,
+                    font,
+                    marks_copy,
+                )
             else:
-                render_pattern(screen, current_slides,
-                               current_pattern_type, current_background,
-                               font, marks_copy)
+                render_pattern(
+                    screen,
+                    current_slides,
+                    current_pattern_type,
+                    current_background,
+                    font,
+                    marks_copy,
+                )
 
         pygame.display.flip()
-        clock.tick(30)
+        # Lower FPS a bit to reduce CPU; tweak as needed (e.g. 10–15)
+        clock.tick(10)
 
     pygame.quit()
 
