@@ -506,6 +506,7 @@ def render_loop(
     current_background: Optional[pygame.Surface] = None
     current_end_time: float = 0.0
     last_marks: set[int] = set()
+    current_marks_snapshot: set[int] = set()
     marks_changed = False
     first_run = True
 
@@ -527,8 +528,11 @@ def render_loop(
             cmd = controller.pending_command
             controller.pending_command = None
             paused = controller.paused
-            marks_changed = True if last_marks != controller.current_marks else False
-            last_marks = controller.current_marks
+            current_marks_snapshot = set(controller.current_marks)
+
+        # Compare snapshots OUTSIDE the lock
+        marks_changed = (current_marks_snapshot != last_marks)
+        last_marks = current_marks_snapshot
 
         force_next = False
         force_prev = False
