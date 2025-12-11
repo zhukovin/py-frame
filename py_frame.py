@@ -470,14 +470,15 @@ def render_loop(
         controller: SlideshowController,
         seconds_to_display: int = 15,
 ):
+    import time
+
     pygame.init()
     screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
     pygame.mouse.set_visible(False)
-    clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 40)
 
     current_slides: list[Slide] = []
-    current_pattern_type: Optional[int] = None  # 0 = single L, 1/2/3 = PPP/PPLLL/PLLL
+    current_pattern_type: Optional[int] = None
     current_background: Optional[pygame.Surface] = None
     current_end_time: float = 0.0
 
@@ -485,14 +486,14 @@ def render_loop(
     while running:
         now = time.time()
 
-        # Handle local events (ESC / close)
+        # --- Handle RPi keyboard / ESC ---
         for event in pygame.event.get():
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 running = False
             elif event.type == pygame.QUIT:
                 running = False
 
-        # --- Take any pending command and paused state from web/controller ---
+        # --- Take pending web command ---
         with controller.lock:
             cmd = controller.pending_command
             controller.pending_command = None
@@ -519,7 +520,7 @@ def render_loop(
                     controller.paused = False
                 paused = False
 
-        # --- Decide if we need a new screen ---
+        # --- Decide if slideshow should advance ---
         need_advance = False
         backward = False
 
@@ -530,23 +531,22 @@ def render_loop(
             need_advance = True
             backward = False
         elif (not current_slides) or (now >= current_end_time and not paused):
-            # Auto-advance only if not paused
             need_advance = True
             backward = False
 
+        # --- Slide switching logic ---
         if need_advance:
-            # finalize exclusions for the screen we're leaving
             finalize_exclusions(controller)
 
             if backward:
-                # --- Move back in history ---
+                # history backwards
                 with controller.lock:
                     if controller.history:
                         controller.history_index = max(
                             0,
                             controller.history_index - steps
                             if controller.history_index >= 0
-                            else len(controller.history) - 1 - steps,
+                            else len(controller.history) - 1 - steps
                         )
                         idx = controller.history_index
                         slides, ptype = controller.history[idx]
@@ -560,35 +560,35 @@ def render_loop(
                     if current_pattern_type == 0:
                         rects = [(current_slides[0].surface, screen.get_rect())]
                     else:
-                        rects = compute_pattern_rects(screen, current_slides, current_pattern_type)
+                        rects = compute_pattern_rects(
+                            screen, current_slides, current_pattern_type
+                        )
 
-                    # blurred background based on layout rects
                     current_background = build_blurred_background(
-                        screen.get_size(),
-                        rects
+                        screen.get_size(), rects
                     )
                     current_end_time = now + seconds_to_display
 
-                # skip to rendering
-                continue
+                continue  # go to rendering below
 
-            # --- Forward: history forward or new from deque ---
+            # --- Forward direction ---
             with controller.lock:
                 hist_len = len(controller.history)
                 idx = controller.history_index
 
             used_history = False
             if hist_len > 0 and 0 <= idx < hist_len - 1:
-                # forward in history
                 new_index = min(hist_len - 1, idx + steps)
                 with controller.lock:
                     controller.history_index = new_index
                     slides, ptype = controller.history[new_index]
+
                 current_slides = slides
                 current_pattern_type = ptype
                 used_history = True
+
             else:
-                # need a brand new screen from deque
+                # need a new pattern from deque
                 with not_full:
                     if len(dq) == 0 and producer_done.is_set():
                         running = False
@@ -598,40 +598,40 @@ def render_loop(
                             slide = dq.popleft()
                             not_full.notify_all()
                             current_slides = [slide]
-                            current_pattern_type = 0  # single landscape
+                            current_pattern_type = 0
                         else:
                             slides, ptype = extract_pattern_from_deque(dq)
                             not_full.notify_all()
                             current_slides = slides
                             current_pattern_type = ptype
                     else:
-                        # not enough images -> keep current screen
-                        pass
+                        pass  # keep current screen
 
                 if current_slides and current_pattern_type is not None:
                     with controller.lock:
                         controller.history.append((current_slides, current_pattern_type))
                         controller.history_index = len(controller.history) - 1
 
-            # --- Build background for current screen ---
+            # --- Build blurred background for new screen ---
             if current_slides and current_pattern_type is not None:
                 if current_pattern_type == 0:
                     rects = [(current_slides[0].surface, screen.get_rect())]
                 else:
-                    rects = compute_pattern_rects(screen, current_slides, current_pattern_type)
+                    rects = compute_pattern_rects(
+                        screen, current_slides, current_pattern_type
+                    )
 
                 current_background = build_blurred_background(
-                    screen.get_size(),
-                    rects
+                    screen.get_size(), rects
                 )
                 current_end_time = now + seconds_to_display
 
-            # Update controller current_slides/pattern for web/state
+            # Update state for web
             with controller.lock:
                 controller.current_slides = current_slides
                 controller.current_pattern_type = current_pattern_type
 
-        # --- Render current screen (uses your aspect-ratio-preserving renderers) ---
+        # --- Render current slide(s) ---
         if current_slides and current_pattern_type is not None:
             with controller.lock:
                 marks_copy = set(controller.current_marks)
@@ -655,8 +655,9 @@ def render_loop(
                 )
 
         pygame.display.flip()
-        # Lower FPS a bit to reduce CPU; tweak as needed (e.g. 10–15)
-        clock.tick(10)
+
+        # --- REPLACE clock.tick() ---
+        time.sleep(0.05)   # keeps CPU load low without hammering the Pi
 
     pygame.quit()
 
