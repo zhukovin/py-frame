@@ -12,9 +12,14 @@ from threading import Lock, Thread
 from typing import Optional
 from web_server import run_web
 
+import faulthandler
+import signal
+
+faulthandler.register(signal.SIGUSR1)
+
 Orientation = Literal["P", "L"]  # P = Portrait, L = Landscape
 
-seconds_to_display = 3
+seconds_to_display = 15
 
 
 # ============================================================
@@ -197,6 +202,8 @@ def image_fetcher_thread(
         controller: SlideshowController,
         max_size: int = 5,
 ):
+    print("Image fetcher thread native_id:", threading.get_native_id())
+
     try:
         if not file_paths:
             producer_done.set()
@@ -471,9 +478,26 @@ def render_loop(
         seconds_to_display: int = 15,
 ):
     import time
+    import os
+    import platform
+
+    # Must set env var BEFORE pygame.init()
+    if platform.system() == "Darwin":  # macOS
+        # Put window at top-left of primary display
+        os.environ["SDL_VIDEO_WINDOW_POS"] = "0,0"
 
     pygame.init()
-    screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+
+    if platform.system() == "Darwin":
+        # On macOS: use a borderless window the size of the main desktop,
+        # so other monitors remain usable.
+        display_sizes = pygame.display.get_desktop_sizes()
+        main_w, main_h = display_sizes[0]  # assume first is main screen
+        screen = pygame.display.set_mode((main_w, main_h), pygame.NOFRAME)
+    else:
+        # On Pi (and other platforms) keep true fullscreen
+        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+
     pygame.mouse.set_visible(False)
     font = pygame.font.SysFont(None, 40)
 
@@ -760,6 +784,8 @@ def read_file_list(list_path: str) -> List[str]:
 
 def main():
     import sys
+
+    print("Main thread native_id:", threading.get_native_id())
 
     if len(sys.argv) < 2:
         print("Usage: python slideshow.py file_list.txt")

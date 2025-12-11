@@ -137,6 +137,9 @@ refreshState();
 
 
 def run_web(controller: "SlideshowController"):
+    import threading
+    print("Web server thread native_id:", threading.get_native_id())
+
     app = create_app(controller)
     # host=0.0.0.0 so phones on LAN can reach it
     app.run(host="0.0.0.0", port=7654, threaded=True)
