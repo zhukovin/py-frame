@@ -217,6 +217,7 @@ def image_fetcher_thread(
         while True:
             path = file_paths[idx]
             idx = (idx + 1) % n
+            # path = random.choice(file_paths)
 
             with controller.lock:
                 if path in controller.excluded_paths:
@@ -298,6 +299,7 @@ def draw_slot_overlay(screen: pygame.Surface,
     box_rect = pygame.Rect(rect.x + 8, rect.y + 8, box_w, box_h)
     pygame.draw.rect(screen, color, box_rect)
     screen.blit(text_surf, (box_rect.x + padding, box_rect.y + padding))
+
 
 def build_blurred_background(screen_size, slide_rects):
     """
