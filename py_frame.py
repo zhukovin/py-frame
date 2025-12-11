@@ -438,7 +438,7 @@ def render_pattern(screen: pygame.Surface,
         screen.fill((0, 0, 0))
 
     rects = compute_pattern_rects(screen, slides, pattern_type)
-    print("marks", marks)
+    # print("marks", marks)
     for idx, (surf, rect) in enumerate(rects):
         blit_scaled(screen, surf, rect)
         draw_slot_overlay(screen, rect, idx, (idx in marks), font)
@@ -640,7 +640,7 @@ def render_loop(
 
         # --- Slide switching logic ---
         if need_advance:
-            print("needs redraw")
+            # print("needs redraw")
             finalize_exclusions(controller)
 
             if backward:
@@ -759,7 +759,7 @@ def render_loop(
 
         # --- Render only when needed ---
         if need_to_render:
-            print("Rendering")
+            # print("Rendering")
 
             if current_slides and current_pattern_type is not None:
                 # grab latest marks for drawing
