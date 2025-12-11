@@ -21,6 +21,8 @@ Orientation = Literal["P", "L"]  # P = Portrait, L = Landscape
 
 seconds_to_display = 15
 
+MAX_HISTORY_SCREENS = 5  # or 20, tune as you like
+
 
 # ============================================================
 # Slide object
@@ -691,6 +693,12 @@ def render_loop(
 
                     if current_slides and current_pattern_type is not None:
                         with controller.lock:
+                            # drop oldest if we exceed MAX_HISTORY_SCREENS
+                            if len(controller.history) >= MAX_HISTORY_SCREENS:
+                                controller.history.pop(0)
+                                # adjust history_index because we removed index 0
+                                controller.history_index = max(0, controller.history_index - 1)
+
                             controller.history.append((current_slides, current_pattern_type))
                             controller.history_index = len(controller.history) - 1
 
