@@ -66,8 +66,10 @@ class SlideshowController:
         self.excluded_paths: set[str] = set()
         self.exclusions_file: str = "exclusions.txt"
 
-        # 👉 New: paused state
+        # paused state
         self.paused: bool = False
+        # black-screen mode (screen fully black while slideshow paused)
+        self.black_screen: bool = False
 
 
 def make_old_paper_surface(size):
@@ -568,13 +570,35 @@ def render_loop(
     current_background: Optional[pygame.Surface] = None
     current_end_time: float = 0.0
 
-    # For detecting mark changes
     last_marks: set[int] = set()
     first_run = True
+    prev_is_night: Optional[bool] = None  # for schedule transitions
 
     running = True
     while running:
         now = time.time()
+
+        # --- Time-based schedule: 22:00–07:00 => screen off ---
+        lt = time.localtime(now)
+        hour = lt.tm_hour
+        is_night = (hour >= 22 or hour < 7)
+
+        if prev_is_night is None:
+            prev_is_night = is_night
+
+        if is_night != prev_is_night:
+            # We just crossed the boundary (day -> night or night -> day)
+            if is_night:
+                # Entering night: auto screen_off + pause
+                with controller.lock:
+                    controller.black_screen = True
+                    controller.paused = True
+            else:
+                # Leaving night: auto screen_on + resume
+                with controller.lock:
+                    controller.black_screen = False
+                    controller.paused = False
+            prev_is_night = is_night
 
         # --- Handle keyboard / ESC ---
         for event in pygame.event.get():
@@ -585,14 +609,15 @@ def render_loop(
                 running = False
                 continue
 
-        # --- Take pending web command + snapshot marks ---
+        # --- Take pending web command + snapshot marks + black_screen ---
         with controller.lock:
             cmd = controller.pending_command
             controller.pending_command = None
             paused = controller.paused
+            black_screen = controller.black_screen
             current_marks_snapshot = set(controller.current_marks)
 
-        # Detect mark changes (compare snapshots, not same object)
+        # Detect mark changes (compare snapshots)
         marks_changed = (current_marks_snapshot != last_marks)
         last_marks = current_marks_snapshot
 
@@ -616,6 +641,18 @@ def render_loop(
                 with controller.lock:
                     controller.paused = False
                 paused = False
+            elif ctype == "screen_off":
+                with controller.lock:
+                    controller.black_screen = True
+                    controller.paused = True
+                black_screen = True
+                paused = True
+            elif ctype == "screen_on":
+                with controller.lock:
+                    controller.black_screen = False
+                    controller.paused = False
+                black_screen = False
+                paused = False
 
         # --- Decide if slideshow should advance ---
         need_advance = False
@@ -627,7 +664,8 @@ def render_loop(
         elif force_next:
             need_advance = True
             backward = False
-        elif (not current_slides) or (now >= current_end_time and not paused):
+        elif (not current_slides) or (now >= current_end_time and not paused and not black_screen):
+            # auto-advance only if not paused and not in black-screen mode
             need_advance = True
             backward = False
 
@@ -637,12 +675,16 @@ def render_loop(
             need_to_render = True
             first_run = False
 
-        if marks_changed:
+        if marks_changed and not black_screen:
+            need_to_render = True
+
+        # If we just turned screen_on/off, we should redraw
+        if cmd and cmd.get("type") in ("screen_off", "screen_on"):
             need_to_render = True
 
         # --- Slide switching logic ---
         if need_advance:
-            # print("needs redraw")
+            print("needs redraw")
             finalize_exclusions(controller)
 
             if backward:
@@ -664,7 +706,7 @@ def render_loop(
                 current_pattern_type = ptype
 
                 if current_slides and current_pattern_type is not None:
-                    # 👉 Pre-downscale all slides to fit screen size
+                    # (optional) downscale to screen size if you've added that helper
                     screen_w, screen_h = screen.get_size()
                     downscale_slides_to_screen(current_slides, screen_w, screen_h)
 
@@ -680,7 +722,6 @@ def render_loop(
                     )
                     current_end_time = now + seconds_to_display
 
-                    # 🔴 FIX: update controller state so /api/state sees the new slides
                     with controller.lock:
                         controller.current_slides = current_slides
                         controller.current_pattern_type = current_pattern_type
@@ -725,12 +766,6 @@ def render_loop(
 
                     if current_slides and current_pattern_type is not None:
                         with controller.lock:
-                            # drop oldest if we exceed MAX_HISTORY_SCREENS
-                            if len(controller.history) >= MAX_HISTORY_SCREENS:
-                                controller.history.pop(0)
-                                # adjust history_index because we removed index 0
-                                controller.history_index = max(0, controller.history_index - 1)
-
                             controller.history.append((current_slides, current_pattern_type))
                             controller.history_index = len(controller.history) - 1
 
@@ -738,7 +773,6 @@ def render_loop(
 
                 # --- Build blurred background for new screen ---
                 if current_slides and current_pattern_type is not None:
-                    # 👉 Pre-downscale all slides to fit screen size
                     screen_w, screen_h = screen.get_size()
                     downscale_slides_to_screen(current_slides, screen_w, screen_h)
 
@@ -754,37 +788,42 @@ def render_loop(
                     )
                     current_end_time = now + seconds_to_display
 
-                    # Forward direction already had this, keep it:
                     with controller.lock:
                         controller.current_slides = current_slides
                         controller.current_pattern_type = current_pattern_type
 
         # --- Render only when needed ---
         if need_to_render:
-            # print("Rendering")
+            print("Rendering")
 
-            if current_slides and current_pattern_type is not None:
-                # grab latest marks for drawing
-                with controller.lock:
-                    marks_copy = set(controller.current_marks)
+            if black_screen:
+                # Show pure black, regardless of slides
+                screen.fill((0, 0, 0))
+            else:
+                if current_slides and current_pattern_type is not None:
+                    with controller.lock:
+                        marks_copy = set(controller.current_marks)
 
-                if current_pattern_type == 0:
-                    render_single_landscape(
-                        screen,
-                        current_slides[0],
-                        current_background,
-                        font,
-                        marks_copy,
-                    )
+                    if current_pattern_type == 0:
+                        render_single_landscape(
+                            screen,
+                            current_slides[0],
+                            current_background,
+                            font,
+                            marks_copy,
+                        )
+                    else:
+                        render_pattern(
+                            screen,
+                            current_slides,
+                            current_pattern_type,
+                            current_background,
+                            font,
+                            marks_copy,
+                        )
                 else:
-                    render_pattern(
-                        screen,
-                        current_slides,
-                        current_pattern_type,
-                        current_background,
-                        font,
-                        marks_copy,
-                    )
+                    # no slides, just clear
+                    screen.fill((0, 0, 0))
 
             pygame.display.flip()
 

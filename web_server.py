@@ -22,7 +22,8 @@ def create_app(controller: "SlideshowController") -> Flask:
                 for i, s in enumerate(controller.current_slides)
             ]
             paused = controller.paused
-        return jsonify({"slides": slides, "paused": paused})
+            black = controller.black_screen
+        return jsonify({"slides": slides, "paused": paused, "black": black})
 
     @app.route("/api/mark", methods=["POST"])
     def api_mark():
@@ -44,7 +45,7 @@ def create_app(controller: "SlideshowController") -> Flask:
         cmd = data.get("cmd")
         steps = int(data.get("steps", 1))
 
-        if cmd not in ("next", "prev", "pause", "play"):
+        if cmd not in ("next", "prev", "pause", "play", "screen_off", "screen_on"):
             return jsonify({"ok": False, "error": "bad cmd"}), 400
 
         with controller.lock:
@@ -76,6 +77,8 @@ def create_app(controller: "SlideshowController") -> Flask:
     <button onclick="sendCommand('next', 1)">Next &raquo;</button>
     <button onclick="sendCommand('pause')">Pause</button>
     <button onclick="sendCommand('play')">Play</button>
+    <button onclick="sendCommand('screen_off')">Screen Off</button>
+    <button onclick="sendCommand('screen_on')">Screen On</button>
   </div>
   <div id="status"></div>
   <div id="slots"></div>
@@ -87,7 +90,9 @@ async function refreshState() {
   const slotsDiv = document.getElementById('slots');
   const statusDiv = document.getElementById('status');
 
-  statusDiv.textContent = data.paused ? "Status: PAUSED" : "Status: PLAYING";
+  let status = data.paused ? "PAUSED" : "PLAYING";
+  if (data.black) status += " (SCREEN OFF)";
+  statusDiv.textContent = "Status: " + status;
 
   slotsDiv.innerHTML = '';
   data.slides.forEach(slide => {
