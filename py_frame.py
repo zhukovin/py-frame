@@ -503,6 +503,32 @@ def finalize_exclusions(controller: SlideshowController):
                 f.write(p + "\n")
 
 
+def downscale_slide_to_screen(slide: Slide, max_w: int, max_h: int):
+    """
+    Ensure slide.surface fits within (max_w, max_h).
+    If it's larger, downscale it (preserving aspect ratio) IN-PLACE.
+    This reduces memory usage for history and current slides.
+    """
+    surf = slide.surface
+    w, h = surf.get_width(), surf.get_height()
+
+    # Already small enough
+    if w <= max_w and h <= max_h:
+        return
+
+    # Compute scale factor to fit within screen
+    scale = min(max_w / w, max_h / h)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+
+    slide.surface = smoothscale_safe(surf, (new_w, new_h))
+
+
+def downscale_slides_to_screen(slides: list[Slide], max_w: int, max_h: int):
+    for s in slides:
+        downscale_slide_to_screen(s, max_w, max_h)
+
+
 def render_loop(
         dq: deque[Slide],
         lock: threading.Lock,
@@ -636,6 +662,10 @@ def render_loop(
                 current_pattern_type = ptype
 
                 if current_slides and current_pattern_type is not None:
+                    # 👉 Pre-downscale all slides to fit screen size
+                    screen_w, screen_h = screen.get_size()
+                    downscale_slides_to_screen(current_slides, screen_w, screen_h)
+
                     if current_pattern_type == 0:
                         rects = [(current_slides[0].surface, screen.get_rect())]
                     else:
@@ -706,6 +736,10 @@ def render_loop(
 
                 # --- Build blurred background for new screen ---
                 if current_slides and current_pattern_type is not None:
+                    # 👉 Pre-downscale all slides to fit screen size
+                    screen_w, screen_h = screen.get_size()
+                    downscale_slides_to_screen(current_slides, screen_w, screen_h)
+
                     if current_pattern_type == 0:
                         rects = [(current_slides[0].surface, screen.get_rect())]
                     else:
