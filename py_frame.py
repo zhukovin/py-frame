@@ -505,16 +505,16 @@ def render_loop(
     current_pattern_type: Optional[int] = None
     current_background: Optional[pygame.Surface] = None
     current_end_time: float = 0.0
+
+    # For detecting mark changes
     last_marks: set[int] = set()
-    current_marks_snapshot: set[int] = set()
-    marks_changed = False
     first_run = True
 
     running = True
     while running:
         now = time.time()
 
-        # --- Handle RPi keyboard / ESC ---
+        # --- Handle keyboard / ESC ---
         for event in pygame.event.get():
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 running = False
@@ -523,14 +523,14 @@ def render_loop(
                 running = False
                 continue
 
-        # --- Take pending web command ---
+        # --- Take pending web command + snapshot marks ---
         with controller.lock:
             cmd = controller.pending_command
             controller.pending_command = None
             paused = controller.paused
             current_marks_snapshot = set(controller.current_marks)
 
-        # Compare snapshots OUTSIDE the lock
+        # Detect mark changes (compare snapshots, not same object)
         marks_changed = (current_marks_snapshot != last_marks)
         last_marks = current_marks_snapshot
 
@@ -614,6 +614,11 @@ def render_loop(
                     )
                     current_end_time = now + seconds_to_display
 
+                    # 🔴 FIX: update controller state so /api/state sees the new slides
+                    with controller.lock:
+                        controller.current_slides = current_slides
+                        controller.current_pattern_type = current_pattern_type
+
                 need_to_render = True
 
             else:  # --- Forward direction ---
@@ -649,7 +654,8 @@ def render_loop(
                                 current_slides = slides
                                 current_pattern_type = ptype
                         else:
-                            continue  # keep current screen
+                            # not enough images -> keep current screen
+                            continue
 
                     if current_slides and current_pattern_type is not None:
                         with controller.lock:
@@ -672,16 +678,17 @@ def render_loop(
                     )
                     current_end_time = now + seconds_to_display
 
-                # Update state for web
-                with controller.lock:
-                    controller.current_slides = current_slides
-                    controller.current_pattern_type = current_pattern_type
+                    # Forward direction already had this, keep it:
+                    with controller.lock:
+                        controller.current_slides = current_slides
+                        controller.current_pattern_type = current_pattern_type
 
+        # --- Render only when needed ---
         if need_to_render:
             print("Rendering")
 
-            # --- Render current slide(s) ---
             if current_slides and current_pattern_type is not None:
+                # grab latest marks for drawing
                 with controller.lock:
                     marks_copy = set(controller.current_marks)
 
