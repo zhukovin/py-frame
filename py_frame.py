@@ -19,7 +19,7 @@ faulthandler.register(signal.SIGUSR1)
 
 Orientation = Literal["P", "L"]  # P = Portrait, L = Landscape
 
-seconds_to_display = 3
+seconds_to_display = 15
 
 
 # ============================================================
