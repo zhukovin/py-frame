@@ -443,26 +443,58 @@ def render_pattern(screen: pygame.Surface,
 
 
 def finalize_exclusions(controller: SlideshowController):
-    """Write current_marks from current_slides to exclusions file and set."""
+    """
+    Take currently marked slots from the *current* screen,
+    add their paths to excluded_paths + exclusions file,
+    and also clean up history so excluded images never appear again
+    (even when navigating back with Prev).
+    """
+    # If there is no current screen, just clear marks and return
     if not controller.current_slides:
-        controller.current_marks.clear()
+        with controller.lock:
+            controller.current_marks.clear()
         return
 
+    # Grab and clear marks under lock
     with controller.lock:
         marked_indices = list(controller.current_marks)
         controller.current_marks.clear()
 
-    if not marked_indices:
-        return
+        if not marked_indices:
+            # nothing was marked, no exclusions to process
+            return
 
-    new_paths = []
-    for i in marked_indices:
-        if 0 <= i < len(controller.current_slides):
-            path = controller.current_slides[i].path
-            if path not in controller.excluded_paths:
-                controller.excluded_paths.add(path)
-                new_paths.append(path)
+        # 1) Add marked slide paths to excluded_paths
+        new_paths: list[str] = []
+        for i in marked_indices:
+            if 0 <= i < len(controller.current_slides):
+                path = controller.current_slides[i].path
+                if path not in controller.excluded_paths:
+                    controller.excluded_paths.add(path)
+                    new_paths.append(path)
 
+        # 2) Clean up history: remove any slides whose path is now excluded.
+        #    Drop history entries that become empty.
+        if controller.history:
+            new_history: list[tuple[list[Slide], int]] = []
+            for slides, ptype in controller.history:
+                filtered = [s for s in slides if s.path not in controller.excluded_paths]
+                if filtered:
+                    # keep this history entry, but without excluded slides
+                    new_history.append((filtered, ptype))
+
+            controller.history = new_history
+
+            # Fix history_index so it stays in range, or becomes -1 if history is empty
+            if controller.history:
+                controller.history_index = min(
+                    controller.history_index,
+                    len(controller.history) - 1,
+                    )
+            else:
+                controller.history_index = -1
+
+    # 3) Append newly excluded paths to the exclusions file (outside the lock)
     if new_paths:
         with open(controller.exclusions_file, "a") as f:
             for p in new_paths:
