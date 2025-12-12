@@ -14,6 +14,9 @@ from web_server import run_web
 
 import faulthandler
 import signal
+import resource
+import os
+
 
 faulthandler.register(signal.SIGUSR1)
 
@@ -22,6 +25,11 @@ Orientation = Literal["P", "L"]  # P = Portrait, L = Landscape
 seconds_to_display = 15
 
 MAX_HISTORY_SCREENS = 5  # or 20, tune as you like
+
+
+def log_mem(tag=""):
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    print(f"[MEM {tag}] pid={os.getpid()} rss={usage.ru_maxrss} B")
 
 
 # ============================================================
@@ -766,6 +774,12 @@ def render_loop(
 
                     if current_slides and current_pattern_type is not None:
                         with controller.lock:
+                            # Enforce max history size
+                            if len(controller.history) >= MAX_HISTORY_SCREENS:
+                                # Drop the oldest entry
+                                controller.history.pop(0)
+                                # Adjust index because we removed index 0
+                                controller.history_index = max(0, controller.history_index - 1)
                             controller.history.append((current_slides, current_pattern_type))
                             controller.history_index = len(controller.history) - 1
 
@@ -826,6 +840,9 @@ def render_loop(
                     screen.fill((0, 0, 0))
 
             pygame.display.flip()
+
+        if need_advance:
+            log_mem("after_advance")
 
         time.sleep(0.2)   # keeps CPU load low without hammering the Pi
 
