@@ -1,12 +1,11 @@
 import threading
-import time
 from collections import deque
 from dataclasses import dataclass
 from itertools import islice, product
-from typing import List, Tuple, Literal, Optional
+from typing import List, Tuple, Literal
 
 import pygame
-from PIL import Image, ExifTags, ImageOps
+from PIL import Image, ImageOps
 import random
 from threading import Lock, Thread
 from typing import Optional
@@ -32,27 +31,11 @@ def log_mem(tag=""):
     print(f"[MEM {tag}] pid={os.getpid()} rss={usage.ru_maxrss} B")
 
 
-# ============================================================
-# Slide object
-# ============================================================
-
 @dataclass
 class Slide:
     path: str
     surface: pygame.Surface
     orientation: Orientation  # "P" or "L"
-
-
-# ============================================================
-# EXIF / orientation helpers
-# ============================================================
-
-# EXIF orientation tag id
-EXIF_ORIENTATION_TAG = None
-for k, v in ExifTags.TAGS.items():
-    if v == "Orientation":
-        EXIF_ORIENTATION_TAG = k
-        break
 
 
 class SlideshowController:
