@@ -135,7 +135,11 @@ This configuration uses relative paths, but absolute paths might be used as well
 Just be mindful about paths recorded in exclusions.txt if you decide to change
 how you list the files (old paths might not work and might need migration).
 
-...
+Improvise from here:
+```
+ls nasus/photo/Camera\ Media/Camera\ Irina/20{10,11,12,13,14,15,16,17}/*.{jpg,JPG,jpeg,JPEG} > photo.irina.list
+ls nasus/photo/Camera\ Media/Camera\ Irina/20{18,19,20,21,22,23,24,25}/*.{jpg,JPG,jpeg,JPEG} >> photo.irina.list
+```
 
 ## Make slideshow start on RPi boot
 
@@ -187,13 +191,54 @@ Disable TTY1:
 sudo systemctl disable getty@tty1.service
 ```
 
+### Step 3
+```
+sudo systemctl enable py-frame.service
+```
 Reboot to check if slideshow starts on boot.
 
 ```
 reboot
 ```
 
+### Useful commands
+After changing `py-frame.service` reload it:
+```
+sudo systemctl daemon-reload
+```
 
+To start/stop the service:
+```
+sudo systemctl start py-frame.service
+sudo systemctl stop  py-frame.service
+```
 
+Get status:
+```
+sudo systemctl status py-frame.service --no-pager
+```
 
+# Troubleshooting
 
+```
+dmesg -T | tail -n 100
+watch -n 5 free -h
+pgrep python
+vcgencmd measure_volts
+vcgencmd measure_temp
+stress --cpu 4 --timeout 3000
+hostname -I
+arp -a
+ifconfig getifaddr wlan0
+rfkill list
+sudo rfkill unblock all
+```
+Enable SSH on RPi:
+```
+sudo raspi-config
+```
+
+Measure file download speed:
+```
+dd if=~/nasus/photo/2020/VID_20200120_083451.mp4 of=/dev/null bs=4M status=progress
+```
