@@ -1,7 +1,42 @@
-## Create target folder on RPi
+# Raspberry Pi slideshow 
 
-```bash
+This project is to create a photo frame driven by Raspberry Pi connected to an external 
+generic monitor. The Python code reads in a file that lists photos to display.
+The photos are read from a remote NAS on the same LAN via an NFS mounted folder.
+
+
+WiFi or Ethernet config of the RPi is out of scope of this guide. Just configure networking
+that you prefer and put it on the same LAN as the NAS that stores the photos.
+
+## How to use the photo frame
+On your mobile device open this in your browser to control the slideshow:
+```
+http://rpi:7654
+```
+If you see a photo that you would rather skip next time, out it on pause, go back with Prev
+and mark that photo by its number. Next time this photo will be excluded.
+
+The screen goes automatically dark at 22:00 and goes back on at 7:00 in the morning.
+You can manually turn it on and off at any moment.
+
+## Install required Python libraries
+```
+pip3 install pillow
+pip3 install pygame
+pip3 install flask
+```
+I might have forgotten some other libs, but you will see error and install what's needed. 
+
+## Create target folder on RPi
+```
 mkdir ~/py-frame
+cd ~/py-frame
+```
+
+Get the executable code:
+```
+curl -L raw.githubusercontent.com/zhukovin/py-frame/main/py_frame.py -o py_frame.py
+curl -L raw.githubusercontent.com/zhukovin/py-frame/main/web_server.py -o web_server.py
 ```
 
 ## Mount NAS photo folder using NFS
@@ -44,7 +79,7 @@ On `RPi` run:
 sudo mount -t nfs -o vers=3 nasus:/volume1/photo /mnt/nasus/photo
 ```
 Check that NFS  mount works and files are visible:
-```bash
+```
 ls /mnt/nasus/photo
 ```
 You should see photo's content and no errors.
@@ -66,7 +101,7 @@ The photos are listed as relative paths starting with `nasus/photo/...` in
 both `photo.xxx.list` and `exclusions.txt`. This means that we need to map `nasus`
 folder inside the target folder.
 
-```bash
+```
 ln -s /mnt/nasus ~/py-frame/nasus
 ```
 
@@ -95,18 +130,25 @@ drwxrwxrwx 105 1026 users   4096 May 18  2022  2004
 drwxrwxrwx  69 1026 users   4096 Mar 16  2023  2005
 ```
 
+## Make a list of photos to display
+This configuration uses relative paths, but absolute paths might be used as well.
+Just be mindful about paths recorded in exclusions.txt if you decide to change
+how you list the files (old paths might not work and might need migration).
+
+...
+
 ## Make slideshow start on RPi boot
 
 ### Step 1
 Create file py-frame.service:
 
-```bash
+```
 sudo nano /etc/systemd/system/py-frame.service
 ```
 
 with this content:
 
-```bash
+```
 [Unit]
 Description=Raspberry Pi Photo Frame Slideshow (console)
 After=network.target local-fs.target
@@ -141,13 +183,13 @@ WantedBy=multi-user.target
 ### Step 2
 Disable TTY1:
 
-```bash
+```
 sudo systemctl disable getty@tty1.service
 ```
 
 Reboot to check if slideshow starts on boot.
 
-```bash
+```
 reboot
 ```
 
