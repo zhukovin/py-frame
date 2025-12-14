@@ -71,9 +71,22 @@ the `admin` must have access to photo folder:
 
 ![Admin Permissions](./pictures/admin-perms.jpg)
 
-### Mount NAS NFS
+### Mount NAS NFS on RPi
 
 #### First, try it manually
+On `RPi` add NAS to hosts to force IPv4 resolution. For some reason,
+`host nasus` on my RPi resolves to IPv6 only that does not works with NFS v3.
+```
+sudo nano /etc/hosts
+```
+Add:
+```
+192.168.1.189   nasus
+```
+Make sure the mountpoint exists:
+```
+sudo mkdir -p /mnt/nasus/photo
+```
 On `RPi` run:
 ```
 sudo mount -t nfs -o vers=3 nasus:/volume1/photo /mnt/nasus/photo
@@ -85,15 +98,62 @@ ls /mnt/nasus/photo
 You should see photo's content and no errors.
 
 #### Auto-mount NAS photo folder on RPi boot
+Create a systemd service that waits for network + NAS, then mounts:
 ```
-sudo nano /etc/fstab
+sudo nano /etc/systemd/system/nasus-photo-mount.service
 ```
-Add the following line:
+Paste this:
 ```
-nasus:/volume1/photo  /mnt/nasus/photo  nfs  vers=3,noauto,x-systemd.automount,_netdev,nofail,defaults,noatime,nolock,tcp,soft,timeo=50,retrans=2  0  0
+[Unit]
+Description=Mount NAS photo share after network is ready
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+
+# Wait for a default route AND NAS to respond, then mount.
+# Retries for ~5 minutes.
+ExecStartPre=/bin/sh -c '\
+  for i in $(seq 1 300); do \
+    ip route | grep -q "^default" || { sleep 1; continue; }; \
+    ping -4 -c1 -W1 192.168.1.189 >/dev/null 2>&1 && exit 0; \
+    sleep 1; \
+  done; \
+  exit 1'
+
+# Don’t remount if already mounted
+ExecStart=/bin/sh -c 'mountpoint -q /mnt/nasus/photo || /bin/mount -t nfs -o vers=3,_netdev,noatime,nolock,tcp,soft,timeo=50,retrans=2 nasus:/volume1/photo /mnt/nasus/photo'
+
+RemainAfterExit=yes
+
+# If NAS wasn’t ready in time, keep retrying in the background after boot
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+Enable it:
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now nasus-photo-mount.service
+```
+Check:
+```
+systemctl status nasus-photo-mount.service
+mount | grep /mnt/nasus/photo || true
+ls /mnt/nasus/photo
 ```
 
 Reboot RPi and check if you can still list photo files.
+
+After reboot run this for diagnostics:
+```
+systemctl status nasus-photo-mount.service
+journalctl -u nasus-photo-mount.service -b --no-pager
+mount | grep /mnt/nasus/photo || true
+```
 
 ### Link mounted NAS folder to the target folder
 
@@ -232,6 +292,8 @@ arp -a
 ifconfig getifaddr wlan0
 rfkill list
 sudo rfkill unblock all
+systemctl status mnt-nasus-photo.mount
+journalctl -u mnt-nasus-photo.mount -b
 ```
 Enable SSH on RPi:
 ```
