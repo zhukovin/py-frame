@@ -197,6 +197,10 @@ how you list the files (old paths might not work and might need migration).
 
 Improvise from here:
 ```
+find nasus/photo/Camera\ Media/Camera\ Alexey -type f \( -iname '*.jpg' -o -iname '*.jpeg' \) >photo.alex.list
+```
+or
+```
 ls nasus/photo/Camera\ Media/Camera\ Irina/20{10,11,12,13,14,15,16,17}/*.{jpg,JPG,jpeg,JPEG} > photo.irina.list
 ls nasus/photo/Camera\ Media/Camera\ Irina/20{18,19,20,21,22,23,24,25}/*.{jpg,JPG,jpeg,JPEG} >> photo.irina.list
 ```
