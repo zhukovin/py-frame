@@ -65,21 +65,66 @@ def create_app(controller: "SlideshowController") -> Flask:
   <meta charset="utf-8">
   <title>Frame Control</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    button { font-size: 1.5rem; margin: 0.3rem; }
-    .slot { border: 1px solid #ccc; margin: 0.5rem; padding: 0.5rem; }
-    .marked { background: #fdd; }
-  </style>
+<style>
+  body {
+    font-family: sans-serif;
+    margin: 10px;
+  }
+
+  .controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;   /* 2 buttons per row */
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .controls button {
+    font-size: 20px;
+    padding: 18px 10px;              /* tall buttons */
+    border-radius: 10px;
+    border: none;
+    background: #2c7be5;
+    color: white;
+    cursor: pointer;
+  }
+
+  .controls button:active {
+    background: #1a5dc9;
+  }
+
+  .controls button:focus {
+    outline: none;
+  }
+
+  #status {
+    margin: 10px 0;
+    font-weight: bold;
+  }
+
+  .slot {
+    border: 1px solid #ccc;
+    padding: 8px;
+    margin-bottom: 8px;
+    border-radius: 6px;
+  }
+
+  .slot.marked {
+    border-color: red;
+    background: #ffecec;
+  }
+</style>
 </head>
 <body>
-  <div>
-    <button onclick="sendCommand('prev', 1)">&laquo; Prev</button>
-    <button onclick="sendCommand('next', 1)">Next &raquo;</button>
-    <button onclick="sendCommand('pause')">Pause</button>
-    <button onclick="sendCommand('play')">Play</button>
-    <button onclick="sendCommand('screen_off')">Screen Off</button>
-    <button onclick="sendCommand('screen_on')">Screen On</button>
-  </div>
+    <div class="controls">
+      <button onclick="sendCommand('pause')">Pause</button>
+      <button onclick="sendCommand('play')">Play</button>
+    
+      <button onclick="sendCommand('prev', 1)"><<&nbsp;Prev</button>
+      <button onclick="sendCommand('next', 1)">Next&nbsp;>></button>
+    
+      <button onclick="sendCommand('screen_off')">Screen Off</button>
+      <button onclick="sendCommand('screen_on')">Screen On</button>
+    </div>
   <div id="status"></div>
   <div id="slots"></div>
 
