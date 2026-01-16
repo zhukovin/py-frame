@@ -8,6 +8,29 @@ The photos are read from a remote NAS on the same LAN via an NFS mounted folder.
 WiFi or Ethernet config of the RPi is out of scope of this guide. Just configure networking
 that you prefer and put it on the same LAN as the NAS that stores the photos.
 
+## Testing
+
+This project includes a comprehensive test suite with **70% coverage** and **48 tests** covering all critical business logic.
+
+**Quick Start:**
+```bash
+# Install dependencies (includes testing tools)
+pip3 install -r requirements.txt
+
+# Run tests
+pytest test_py_frame.py test_web_server.py -v
+
+# View coverage report
+pytest --cov=. --cov-report=html
+open htmlcov/index.html
+```
+
+**Documentation:**
+- [TESTING_QUICKSTART.md](TESTING_QUICKSTART.md) - Quick guide for running tests
+- [TESTING.md](TESTING.md) - Complete coverage analysis
+- [COVERAGE_SUMMARY.md](COVERAGE_SUMMARY.md) - Visual coverage overview
+- [FINAL_REPORT.md](FINAL_REPORT.md) - Executive summary
+
 ## How to use the photo frame
 On your mobile device open this in your browser to control the slideshow:
 ```
@@ -20,12 +43,21 @@ The screen goes automatically dark at 22:00 and goes back on at 7:00 in the morn
 You can manually turn it on and off at any moment.
 
 ## Install required Python libraries
+
+**Option 1: Using requirements.txt (Recommended)**
+```bash
+pip3 install -r requirements.txt
 ```
-pip3 install pillow
-pip3 install pygame
-pip3 install flask
+
+**Option 2: Manual installation**
+```bash
+pip3 install pillow pygame flask
 ```
-I might have forgotten some other libs, but you will see error and install what's needed. 
+
+For development and testing, also install:
+```bash
+pip3 install pytest pytest-cov coverage
+``` 
 
 ## Create target folder on RPi
 ```
