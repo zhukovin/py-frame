@@ -24,6 +24,7 @@ from py_frame import (
     blit_scaled,
     draw_slot_overlay,
     compute_pattern_rects,
+    load_exclusions,
     finalize_exclusions,
     downscale_slide_to_screen,
     downscale_slides_to_screen,
@@ -304,6 +305,68 @@ class TestComputePatternRects:
         
         # Should have 4 rects
         assert len(rects) == 4
+
+
+class TestLoadExclusions:
+    """Test suite for load_exclusions function"""
+
+    def setup_method(self):
+        """Create test controller pointing at a temp exclusions file"""
+        self.temp_dir = tempfile.mkdtemp()
+        self.controller = SlideshowController()
+        self.controller.exclusions_file = os.path.join(self.temp_dir, "exclusions.txt")
+
+    def teardown_method(self):
+        """Clean up test files"""
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_load_missing_file_is_noop(self):
+        """Test that a missing exclusions file leaves excluded_paths empty"""
+        load_exclusions(self.controller)
+
+        assert self.controller.excluded_paths == set()
+
+    def test_load_populates_excluded_paths(self):
+        """Test that existing exclusions file paths are loaded"""
+        with open(self.controller.exclusions_file, "w") as f:
+            f.write("test1.jpg\n")
+            f.write("test2.jpg\n")
+
+        load_exclusions(self.controller)
+
+        assert self.controller.excluded_paths == {"test1.jpg", "test2.jpg"}
+
+    def test_load_skips_blank_lines(self):
+        """Test that blank lines in the exclusions file are ignored"""
+        with open(self.controller.exclusions_file, "w") as f:
+            f.write("test1.jpg\n")
+            f.write("\n")
+            f.write("   \n")
+            f.write("test2.jpg\n")
+
+        load_exclusions(self.controller)
+
+        assert self.controller.excluded_paths == {"test1.jpg", "test2.jpg"}
+
+    def test_load_then_finalize_appends(self):
+        """Test that paths loaded at startup persist and new marks append to the file"""
+        with open(self.controller.exclusions_file, "w") as f:
+            f.write("old.jpg\n")
+
+        load_exclusions(self.controller)
+        assert "old.jpg" in self.controller.excluded_paths
+
+        self.controller.current_slides = [
+            Slide(path="new.jpg", surface=None, orientation="L")
+        ]
+        self.controller.current_marks = {0}
+        finalize_exclusions(self.controller)
+
+        assert self.controller.excluded_paths == {"old.jpg", "new.jpg"}
+        with open(self.controller.exclusions_file) as f:
+            lines = [l.strip() for l in f if l.strip()]
+        assert lines == ["old.jpg", "new.jpg"]
 
 
 class TestFinalizeExclusions:

@@ -439,6 +439,21 @@ def render_pattern(screen: pygame.Surface,
         draw_slot_overlay(screen, rect, idx, (idx in marks), font)
 
 
+def load_exclusions(controller: SlideshowController):
+    """
+    Populate controller.excluded_paths from controller.exclusions_file, if it exists.
+    Called once at startup so exclusions persist across restarts.
+    """
+    if not os.path.exists(controller.exclusions_file):
+        return
+
+    with open(controller.exclusions_file, "r") as f:
+        for line in f:
+            path = line.strip()
+            if path:
+                controller.excluded_paths.add(path)
+
+
 def finalize_exclusions(controller: SlideshowController):
     """
     Take currently marked slots from the *current* screen,
@@ -938,6 +953,7 @@ def main():
         sys.exit(1)
 
     controller = SlideshowController()
+    load_exclusions(controller)
 
     list_path = sys.argv[1]
     file_paths = read_file_list(list_path)
