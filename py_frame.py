@@ -36,6 +36,8 @@ class Slide:
     path: str
     surface: pygame.Surface
     orientation: Orientation  # "P" or "L"
+    load_bytes: int = 0       # raw file size read from disk/NFS
+    load_seconds: float = 0.0  # time spent reading those bytes (excludes decode)
 
 
 class SlideshowController:
@@ -61,6 +63,11 @@ class SlideshowController:
         self.paused: bool = False
         # black-screen mode (screen fully black while slideshow paused)
         self.black_screen: bool = False
+
+        # Diagnostics: whether the most recent photo load attempt succeeded,
+        # and the recent read speed (Kbps) over the last few successful loads.
+        self.drive_ok: bool = True
+        self.download_kbps: Optional[float] = None
 
 
 def make_old_paper_surface(size):
@@ -88,17 +95,28 @@ def load_slide(path: str) -> Slide:
     classify it as Portrait (P) or Landscape (L), and convert to a
     pygame.Surface.
     """
-    # 1) Load with Pillow
-    img = Image.open(path)
+    import io
+    import time
 
-    # 2) Apply EXIF orientation (rotates/flip as needed)
+    # 1) Read the raw bytes ourselves (timed) so callers can measure
+    #    disk/NFS read speed separately from JPEG decode (CPU) time.
+    t0 = time.monotonic()
+    with open(path, "rb") as f:
+        raw = f.read()
+    load_seconds = time.monotonic() - t0
+    load_bytes = len(raw)
+
+    # 2) Load with Pillow from the in-memory bytes
+    img = Image.open(io.BytesIO(raw))
+
+    # 3) Apply EXIF orientation (rotates/flip as needed)
     img = ImageOps.exif_transpose(img)
 
-    # 3) Classify after rotation
+    # 4) Classify after rotation
     width, height = img.size
     orientation: Orientation = "P" if height > width else "L"
 
-    # 4) Ensure mode is suitable for pygame
+    # 5) Ensure mode is suitable for pygame
     if img.mode not in ("RGB", "RGBA"):
         img = img.convert("RGB")
 
@@ -106,13 +124,19 @@ def load_slide(path: str) -> Slide:
     size = img.size
     data = img.tobytes()
 
-    # 5) Convert to pygame surface
+    # 6) Convert to pygame surface
     if mode == "RGBA":
         surface = pygame.image.fromstring(data, size, mode).convert_alpha()
     else:  # "RGB"
         surface = pygame.image.fromstring(data, size, mode).convert()
 
-    return Slide(path=path, surface=surface, orientation=orientation)
+    return Slide(
+        path=path,
+        surface=surface,
+        orientation=orientation,
+        load_bytes=load_bytes,
+        load_seconds=load_seconds,
+    )
 
 
 # ============================================================
@@ -201,6 +225,10 @@ def image_fetcher_thread(
 
     print("Image fetcher thread native_id:", threading.get_native_id())
 
+    # Rolling window of (bytes, seconds) for the last few successful reads,
+    # used to report a live download-speed estimate (not an all-time average).
+    recent_load_stats: deque[tuple[int, float]] = deque(maxlen=5)
+
     try:
         if not file_paths:
             producer_done.set()
@@ -231,8 +259,21 @@ def image_fetcher_thread(
                 slide = load_slide(path)
             except Exception as e:
                 print(f"Failed to load {path}: {e}")
+                recent_load_stats.clear()
+                with controller.lock:
+                    controller.drive_ok = False
+                    controller.download_kbps = None
                 time.sleep(0.5)
                 continue
+
+            recent_load_stats.append((slide.load_bytes, slide.load_seconds))
+            total_bytes = sum(b for b, _ in recent_load_stats)
+            total_seconds = sum(s for _, s in recent_load_stats)
+            kbps = (total_bytes * 8 / 1000) / total_seconds if total_seconds > 0 else None
+
+            with controller.lock:
+                controller.drive_ok = True
+                controller.download_kbps = kbps
 
             with not_full:
                 dq.append(slide)
@@ -300,6 +341,50 @@ def draw_slot_overlay(screen: pygame.Surface,
     box_rect = pygame.Rect(rect.x + 8, rect.y + 8, box_w, box_h)
     pygame.draw.rect(screen, color, box_rect)
     screen.blit(text_surf, (box_rect.x + padding, box_rect.y + padding))
+
+
+def draw_status_overlay(screen: pygame.Surface,
+                        font: pygame.font.Font,
+                        paused: bool,
+                        drive_ok: bool,
+                        download_kbps: Optional[float]):
+    """
+    Draw a small diagnostics box in the bottom-right corner: Playing/Paused,
+    drive mount health, and recent read speed. Drawn last (on top of
+    everything, including black-screen mode) so stalls can be diagnosed
+    without waiting for the next slide change.
+    """
+    LIGHT_GRAY = (211, 211, 211)
+    BLACK = (0, 0, 0)
+
+    lines = [
+        "Paused" if paused else "Playing",
+        "Drive: OK" if drive_ok else "Drive: DISCONNECTED",
+        f"{download_kbps:.0f} Kbps" if download_kbps is not None else "-- Kbps",
+    ]
+
+    padding = 8
+    line_spacing = 2
+    text_surfaces = [font.render(line, True, BLACK) for line in lines]
+
+    box_w = max(s.get_width() for s in text_surfaces) + 2 * padding
+    box_h = sum(s.get_height() for s in text_surfaces) + 2 * padding + line_spacing * (len(lines) - 1)
+
+    screen_w, screen_h = screen.get_size()
+    margin = 10
+    box_rect = pygame.Rect(
+        screen_w - box_w - margin,
+        screen_h - box_h - margin,
+        box_w,
+        box_h,
+    )
+
+    pygame.draw.rect(screen, LIGHT_GRAY, box_rect)
+
+    y = box_rect.y + padding
+    for surf in text_surfaces:
+        screen.blit(surf, (box_rect.x + padding, y))
+        y += surf.get_height() + line_spacing
 
 
 def build_blurred_background(screen_size, slide_rects):
@@ -612,6 +697,7 @@ def render_loop(
 
     pygame.mouse.set_visible(False)
     font = pygame.font.SysFont(None, 40)
+    status_font = pygame.font.SysFont(None, 24)
 
     current_slides: list[Slide] = []
     current_pattern_type: Optional[int] = None
@@ -621,6 +707,8 @@ def render_loop(
     last_marks: set[int] = set()
     first_run = True
     prev_is_night: Optional[bool] = None  # for schedule transitions
+    last_status_render_time: float = 0.0
+    STATUS_REFRESH_SECONDS = 1.0
 
     running = True
     while running:
@@ -664,6 +752,8 @@ def render_loop(
             paused = controller.paused
             black_screen = controller.black_screen
             current_marks_snapshot = set(controller.current_marks)
+            drive_ok = controller.drive_ok
+            download_kbps = controller.download_kbps
 
         # Detect mark changes (compare snapshots)
         marks_changed = (current_marks_snapshot != last_marks)
@@ -728,6 +818,12 @@ def render_loop(
 
         # If we just turned screen_on/off, we should redraw
         if cmd and cmd.get("type") in ("screen_off", "screen_on"):
+            need_to_render = True
+
+        # Refresh the status overlay periodically even if nothing else
+        # changed, so drive/speed issues show up promptly instead of
+        # waiting for the next slide change.
+        if now - last_status_render_time >= STATUS_REFRESH_SECONDS:
             need_to_render = True
 
         # --- Slide switching logic ---
@@ -879,7 +975,12 @@ def render_loop(
                     # no slides, just clear
                     screen.fill((0, 0, 0))
 
+            # Diagnostics overlay: drawn last, on top of everything
+            # (including black-screen mode) so stalls are visible.
+            draw_status_overlay(screen, status_font, paused, drive_ok, download_kbps)
+
             pygame.display.flip()
+            last_status_render_time = now
 
         if need_advance:
             log_mem("after_advance")

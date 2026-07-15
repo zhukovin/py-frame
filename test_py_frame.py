@@ -22,6 +22,7 @@ from py_frame import (
     smoothscale_safe,
     blit_scaled,
     draw_slot_overlay,
+    draw_status_overlay,
     compute_pattern_rects,
     load_exclusions,
     finalize_exclusions,
@@ -118,7 +119,9 @@ class TestSlideshowController:
         assert controller.exclusions_file == "exclusions.txt"
         assert controller.paused is False
         assert controller.black_screen is False
-    
+        assert controller.drive_ok is True
+        assert controller.download_kbps is None
+
     def test_marks_management(self):
         """Test marking and unmarking slides"""
         controller = SlideshowController()
@@ -238,10 +241,22 @@ class TestLoadSlide:
         img_path = os.path.join(self.temp_dir, "square.jpg")
         img = Image.new("RGB", (100, 100), color="green")
         img.save(img_path)
-        
+
         slide = load_slide(img_path)
-        
+
         assert slide.orientation == "L"  # Equal dimensions = landscape
+
+    def test_load_slide_reports_read_size_and_timing(self):
+        """Test that load_slide reports the raw bytes read and time taken,
+        used for the download-speed diagnostics overlay"""
+        img_path = os.path.join(self.temp_dir, "timed.jpg")
+        img = Image.new("RGB", (100, 100), color="yellow")
+        img.save(img_path)
+
+        slide = load_slide(img_path)
+
+        assert slide.load_bytes == os.path.getsize(img_path)
+        assert slide.load_seconds >= 0
 
 
 class TestSmoothscaleSafe:
@@ -309,6 +324,54 @@ class TestBlitScaled:
         
         # Should scale to fit width (200) and maintain aspect ratio
         blit_scaled(surface, img, target_rect)
+
+
+class TestDrawStatusOverlay:
+    """Test suite for draw_status_overlay function"""
+
+    def setup_method(self):
+        """Initialize pygame"""
+        pygame.init()
+        self.font = pygame.font.SysFont(None, 24)
+
+    def teardown_method(self):
+        """Clean up pygame"""
+        pygame.quit()
+
+    def test_draws_light_gray_box_in_bottom_right_corner(self):
+        """Test that a light-gray box appears near the bottom-right corner,
+        and the rest of the screen is left untouched"""
+        screen = pygame.Surface((400, 300))
+        screen.fill((0, 0, 0))
+
+        draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_kbps=150.0)
+
+        # draw_status_overlay uses a 10px margin from the screen edge, so
+        # probe just inside that margin rather than the literal corner pixel.
+        corner_pixel = screen.get_at((388, 288))[:3]
+        assert corner_pixel == (211, 211, 211)
+
+        far_pixel = screen.get_at((5, 5))[:3]
+        assert far_pixel == (0, 0, 0)
+
+    def test_handles_missing_download_speed(self):
+        """Test that a None download_kbps (e.g. before the first successful
+        load) doesn't crash and still draws the box"""
+        screen = pygame.Surface((400, 300))
+        screen.fill((0, 0, 0))
+
+        draw_status_overlay(screen, self.font, paused=True, drive_ok=False, download_kbps=None)
+
+        corner_pixel = screen.get_at((388, 288))[:3]
+        assert corner_pixel == (211, 211, 211)
+
+    def test_box_stays_within_screen_bounds_on_small_screen(self):
+        """Test that a very small screen doesn't cause the overlay to error out"""
+        screen = pygame.Surface((50, 50))
+        screen.fill((0, 0, 0))
+
+        # Should not raise, even though the box may not fully fit
+        draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_kbps=42.0)
 
 
 class TestComputePatternRects:
@@ -715,6 +778,14 @@ class TestImageFetcherThreadThrottling:
 
     def setup_method(self):
         self.controller = SlideshowController()
+        # Needed for the success-path test, which performs a real load_slide()
+        # call ending in Surface.convert(), which requires a display mode.
+        os.environ['SDL_VIDEODRIVER'] = 'dummy'
+        pygame.init()
+        pygame.display.set_mode((1, 1))
+
+    def teardown_method(self):
+        pygame.quit()
 
     def _run_with_bounded_sleep(self, file_paths, max_calls=3):
         """Run image_fetcher_thread with time.sleep mocked to raise after
@@ -771,6 +842,64 @@ class TestImageFetcherThreadThrottling:
         assert sleep_calls, "expected time.sleep to be called after a failed load"
         assert all(c == 0.5 for c in sleep_calls)
         assert len(dq) == 0
+
+    def test_load_failure_marks_drive_not_ok(self):
+        """A failed load should flag the drive as unreadable and clear the
+        speed estimate, so the on-screen diagnostics reflect the stall"""
+        self.controller.drive_ok = True
+        self.controller.download_kbps = 123.0
+
+        self._run_with_bounded_sleep(["/nonexistent/path/does_not_exist.jpg"])
+
+        assert self.controller.drive_ok is False
+        assert self.controller.download_kbps is None
+
+    def test_successful_load_marks_drive_ok_and_reports_speed(self):
+        """A successful load should flag the drive as OK and compute a
+        Kbps estimate from the read time/size"""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            img_path = os.path.join(temp_dir, "photo.jpg")
+            Image.new("RGB", (50, 50), color="blue").save(img_path)
+
+            self.controller.drive_ok = False
+            self.controller.download_kbps = None
+
+            dq = deque()
+            lock = threading.Lock()
+            not_full = threading.Condition(lock)
+            producer_done = threading.Event()
+
+            def fake_notify_all():
+                raise _StopFetcher()
+
+            def quiet_excepthook(args):
+                if args.exc_type is not _StopFetcher:
+                    threading.__excepthook__(args)
+
+            prev_excepthook = threading.excepthook
+            threading.excepthook = quiet_excepthook
+            prev_notify_all = not_full.notify_all
+            not_full.notify_all = fake_notify_all
+            try:
+                t = threading.Thread(
+                    target=image_fetcher_thread,
+                    args=([img_path], dq, lock, not_full, producer_done, self.controller, 5),
+                    daemon=True,
+                )
+                t.start()
+                t.join(timeout=2)
+            finally:
+                threading.excepthook = prev_excepthook
+                not_full.notify_all = prev_notify_all
+
+            assert not t.is_alive(), "fetcher thread did not stop after the bounded notify_all raised"
+            assert self.controller.drive_ok is True
+            assert self.controller.download_kbps is not None
+            assert self.controller.download_kbps >= 0
+        finally:
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
