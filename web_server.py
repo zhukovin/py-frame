@@ -54,6 +54,23 @@ def create_app(controller: "SlideshowController") -> Flask:
                 controller.current_marks.add(slot)
         return jsonify({"ok": True})
 
+    @app.route("/api/settings", methods=["GET", "POST"])
+    def api_settings():
+        if request.method == "POST":
+            data = request.json or {}
+            if "shuffle_enabled" in data:
+                shuffle_enabled = bool(data["shuffle_enabled"])
+                with controller.lock:
+                    controller.shuffle_enabled = shuffle_enabled
+
+                import json
+                with open(controller.settings_file, "w") as f:
+                    json.dump({"shuffle_enabled": shuffle_enabled}, f)
+
+        with controller.lock:
+            shuffle_enabled = controller.shuffle_enabled
+        return jsonify({"ok": True, "shuffle_enabled": shuffle_enabled})
+
     @app.route("/api/command", methods=["POST"])
     def api_command():
         data = request.json or {}
@@ -114,9 +131,20 @@ def create_app(controller: "SlideshowController") -> Flask:
     outline: none;
   }
 
+  .controls button.active {
+    background: #1a5dc9;
+    box-shadow: inset 0 0 0 3px #ffd166;
+  }
+
   #status {
     margin: 10px 0;
     font-weight: bold;
+  }
+
+  #settings-note {
+    margin: 0 0 16px 0;
+    color: #666;
+    font-size: 13px;
   }
 
   .slot {
@@ -142,7 +170,11 @@ def create_app(controller: "SlideshowController") -> Flask:
     
       <button onclick="sendCommand('screen_off')">Screen Off</button>
       <button onclick="sendCommand('screen_on')">Screen On</button>
+
+      <button id="btn-shuffle" onclick="setShuffleMode(true)">Shuffle</button>
+      <button id="btn-random-start" onclick="setShuffleMode(false)">Random Start</button>
     </div>
+  <div id="settings-note">Order takes effect next time the frame restarts.</div>
   <div id="status"></div>
   <div id="slots"></div>
 
@@ -194,8 +226,25 @@ async function sendCommand(cmd, steps) {
   setTimeout(refreshState, 800);
 }
 
+async function refreshSettings() {
+  const res = await fetch('/api/settings');
+  const data = await res.json();
+  document.getElementById('btn-shuffle').classList.toggle('active', data.shuffle_enabled);
+  document.getElementById('btn-random-start').classList.toggle('active', !data.shuffle_enabled);
+}
+
+async function setShuffleMode(shuffleEnabled) {
+  await fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({shuffle_enabled: shuffleEnabled})
+  });
+  refreshSettings();
+}
+
 setInterval(refreshState, 3000);
 refreshState();
+refreshSettings();
 </script>
 </body>
 </html>

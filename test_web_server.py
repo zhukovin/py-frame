@@ -4,6 +4,8 @@ Tests for Flask web interface and API endpoints
 """
 import pytest
 import pygame
+import os
+import tempfile
 from unittest.mock import Mock, MagicMock
 from flask import Flask
 from web_server import create_app, _parse_int_field
@@ -12,20 +14,24 @@ from py_frame import SlideshowController, Slide
 
 class TestWebServer:
     """Test suite for web server endpoints"""
-    
+
     def setup_method(self):
         """Setup test client and controller"""
         pygame.init()
         pygame.display.set_mode((1, 1))
-        
+
         self.controller = SlideshowController()
+        self.settings_dir = tempfile.mkdtemp()
+        self.controller.settings_file = os.path.join(self.settings_dir, "settings.json")
         self.app = create_app(self.controller)
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
-    
+
     def teardown_method(self):
         """Clean up pygame"""
         pygame.quit()
+        import shutil
+        shutil.rmtree(self.settings_dir, ignore_errors=True)
     
     def test_api_state_empty(self):
         """Test /api/state endpoint with no slides"""
@@ -226,9 +232,46 @@ class TestWebServer:
     def test_api_command_missing_cmd(self):
         """Test /api/command with missing cmd parameter"""
         response = self.client.post('/api/command', json={})
-        
+
         assert response.status_code == 400
-    
+
+    def test_api_settings_get_returns_default(self):
+        """Test that /api/settings GET reflects the controller's default
+        (shuffle enabled) without needing a prior POST"""
+        response = self.client.get('/api/settings')
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['ok'] is True
+        assert data['shuffle_enabled'] is True
+
+    def test_api_settings_post_updates_controller(self):
+        """Test that /api/settings POST updates the controller in-memory"""
+        response = self.client.post('/api/settings', json={'shuffle_enabled': False})
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['shuffle_enabled'] is False
+        assert self.controller.shuffle_enabled is False
+
+    def test_api_settings_post_persists_to_disk(self):
+        """Test that /api/settings POST writes the setting to settings_file
+        so it survives a restart"""
+        self.client.post('/api/settings', json={'shuffle_enabled': False})
+
+        with open(self.controller.settings_file) as f:
+            content = f.read()
+        assert '"shuffle_enabled": false' in content
+
+    def test_api_settings_post_without_field_is_a_noop_read(self):
+        """Test that POSTing without shuffle_enabled just returns current
+        state without changing or writing anything"""
+        response = self.client.post('/api/settings', json={})
+
+        assert response.status_code == 200
+        assert response.get_json()['shuffle_enabled'] is True
+        assert not os.path.exists(self.controller.settings_file)
+
     def test_index_page(self):
         """Test that / endpoint returns HTML page"""
         response = self.client.get('/')
@@ -252,7 +295,9 @@ class TestWebServer:
         assert 'Next' in html
         assert 'Screen Off' in html
         assert 'Screen On' in html
-    
+        assert 'Shuffle' in html
+        assert 'Random Start' in html
+
     def test_index_page_has_javascript(self):
         """Test that index page includes JavaScript for interaction"""
         response = self.client.get('/')

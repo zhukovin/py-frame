@@ -28,6 +28,7 @@ from py_frame import (
     format_speed,
     compute_pattern_rects,
     load_exclusions,
+    load_settings,
     finalize_exclusions,
     reclassify_pattern_type,
     downscale_slide_to_screen,
@@ -126,6 +127,8 @@ class TestSlideshowController:
         assert controller.drive_ok is True
         assert controller.download_bytes_per_sec is None
         assert controller.measurements_file == "load_measurements.csv"
+        assert controller.shuffle_enabled is True
+        assert controller.settings_file == "settings.json"
 
     def test_marks_management(self):
         """Test marking and unmarking slides"""
@@ -642,6 +645,56 @@ class TestLoadExclusions:
         assert lines == ["old.jpg", "new.jpg"]
 
 
+class TestLoadSettings:
+    """Test suite for load_settings function"""
+
+    def setup_method(self):
+        """Create test controller pointing at a temp settings file"""
+        self.temp_dir = tempfile.mkdtemp()
+        self.controller = SlideshowController()
+        self.controller.settings_file = os.path.join(self.temp_dir, "settings.json")
+
+    def teardown_method(self):
+        """Clean up test files"""
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_missing_file_keeps_default(self):
+        """Test that a missing settings file leaves the default (shuffle
+        enabled) untouched"""
+        load_settings(self.controller)
+
+        assert self.controller.shuffle_enabled is True
+
+    def test_loads_persisted_shuffle_disabled(self):
+        """Test that a persisted shuffle_enabled: false is honored"""
+        with open(self.controller.settings_file, "w") as f:
+            f.write('{"shuffle_enabled": false}')
+
+        load_settings(self.controller)
+
+        assert self.controller.shuffle_enabled is False
+
+    def test_loads_persisted_shuffle_enabled(self):
+        """Test that a persisted shuffle_enabled: true is honored"""
+        self.controller.shuffle_enabled = False  # start from the opposite
+        with open(self.controller.settings_file, "w") as f:
+            f.write('{"shuffle_enabled": true}')
+
+        load_settings(self.controller)
+
+        assert self.controller.shuffle_enabled is True
+
+    def test_corrupt_file_falls_back_to_default_instead_of_crashing(self):
+        """Test that invalid JSON doesn't crash startup, just keeps defaults"""
+        with open(self.controller.settings_file, "w") as f:
+            f.write("not valid json{{{")
+
+        load_settings(self.controller)  # should not raise
+
+        assert self.controller.shuffle_enabled is True
+
+
 class TestClassifyPatternType:
     """Test suite for classify_pattern_type, the shared P/L threshold
     classifier used by both extract_pattern_from_deque and
@@ -1021,6 +1074,29 @@ class TestReadFileList:
         paths = read_file_list(self.list_path)
 
         assert sorted(paths) == sorted(expected)
+
+    def test_shuffle_false_rotates_by_random_offset_preserving_relative_order(self):
+        """Test that shuffle=False restores the original rotation behavior:
+        same relative order as the file, just starting from a random point"""
+        expected = [f"image{i}.jpg" for i in range(10)]
+        with open(self.list_path, "w") as f:
+            for name in expected:
+                f.write(name + "\n")
+
+        with patch("random.randrange", return_value=3):
+            paths = read_file_list(self.list_path, shuffle=False)
+
+        assert paths == expected[3:] + expected[:3]
+
+    def test_shuffle_false_does_not_call_random_shuffle(self):
+        """Test that shuffle=False takes the rotation path, not the shuffle one"""
+        with open(self.list_path, "w") as f:
+            f.write("image1.jpg\nimage2.jpg\n")
+
+        with patch("random.shuffle") as mock_shuffle:
+            read_file_list(self.list_path, shuffle=False)
+
+        mock_shuffle.assert_not_called()
 
 
 class TestMainEmptyFileList:

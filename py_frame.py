@@ -73,6 +73,14 @@ class SlideshowController:
         # here for later offline analysis of size/time/speed correlation.
         self.measurements_file: str = "load_measurements.csv"
 
+        # Photo display order at startup: shuffle (fully randomized order)
+        # vs. random-start (original file order, but starting from a random
+        # point and wrapping around). Persisted to disk so the web UI
+        # toggle survives restarts; takes effect the next time the app
+        # starts, since the fetcher thread's order is fixed once built.
+        self.shuffle_enabled: bool = True
+        self.settings_file: str = "settings.json"
+
 
 def make_old_paper_surface(size):
     w, h = size
@@ -696,6 +704,29 @@ def load_exclusions(controller: SlideshowController):
                 controller.excluded_paths.add(path)
 
 
+def load_settings(controller: SlideshowController):
+    """
+    Load persisted app settings (currently just shuffle_enabled) from
+    controller.settings_file, if it exists. Called once at startup, before
+    read_file_list, so the web UI's shuffle/random-start toggle survives
+    restarts. A missing or corrupt settings file falls back to the
+    defaults already set on the controller rather than crashing startup.
+    """
+    if not os.path.exists(controller.settings_file):
+        return
+
+    import json
+
+    try:
+        with open(controller.settings_file, "r") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+
+    if "shuffle_enabled" in data:
+        controller.shuffle_enabled = bool(data["shuffle_enabled"])
+
+
 def reclassify_pattern_type(slides: List[Slide], original_ptype: int) -> Optional[int]:
     """
     Decide how a history entry should be classified after some of its slides
@@ -1168,7 +1199,15 @@ def render_loop(
 # ============================================================
 
 
-def read_file_list(list_path: str) -> List[str]:
+def read_file_list(list_path: str, shuffle: bool = True) -> List[str]:
+    """
+    Read the photo list file and decide the display order:
+      shuffle=True  - fully randomize the order (kept entirely in memory;
+                       nothing downstream re-reads the source file, so
+                       there's no need to persist the shuffled order).
+      shuffle=False - keep the file's original relative order, but start
+                       from a random point and wrap around.
+    """
     paths: List[str] = []
     with open(list_path, "r") as f:
         for line in f:
@@ -1182,11 +1221,11 @@ def read_file_list(list_path: str) -> List[str]:
     if not paths:
         return paths
 
-    # Shuffle into a random display order, kept entirely in memory.
-    # Nothing downstream re-reads the source list file, so there's no need
-    # to persist the shuffled order to a temp file; it's just a plain list
-    # of path strings, cheap to hold even for very long lists.
-    random.shuffle(paths)
+    if shuffle:
+        random.shuffle(paths)
+    else:
+        offset = random.randrange(len(paths))
+        paths = paths[offset:] + paths[:offset]
 
     return paths
 
@@ -1202,9 +1241,10 @@ def main():
 
     controller = SlideshowController()
     load_exclusions(controller)
+    load_settings(controller)
 
     list_path = sys.argv[1]
-    file_paths = read_file_list(list_path)
+    file_paths = read_file_list(list_path, shuffle=controller.shuffle_enabled)
 
     if not file_paths:
         print(f"No .jpg/.jpeg entries found in {list_path}; nothing to display.")
