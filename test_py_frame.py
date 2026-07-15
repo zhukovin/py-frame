@@ -23,6 +23,7 @@ from py_frame import (
     blit_scaled,
     draw_slot_overlay,
     draw_status_overlay,
+    format_speed,
     compute_pattern_rects,
     load_exclusions,
     finalize_exclusions,
@@ -120,7 +121,7 @@ class TestSlideshowController:
         assert controller.paused is False
         assert controller.black_screen is False
         assert controller.drive_ok is True
-        assert controller.download_kbps is None
+        assert controller.download_bytes_per_sec is None
 
     def test_marks_management(self):
         """Test marking and unmarking slides"""
@@ -326,6 +327,39 @@ class TestBlitScaled:
         blit_scaled(surface, img, target_rect)
 
 
+class TestFormatSpeed:
+    """Test suite for format_speed function"""
+
+    def test_none_shows_placeholder(self):
+        assert format_speed(None) == "-- Bps"
+
+    def test_stays_in_bps_below_1000(self):
+        assert format_speed(999) == "999.00 Bps"
+
+    def test_switches_to_kbps_at_1000(self):
+        assert format_speed(1000) == "1.00 KBps"
+
+    def test_switches_to_mbps_just_over_1000_kbps(self):
+        # 1001 KBps -> 1.00 MBps
+        assert format_speed(1001 * 1000) == "1.00 MBps"
+
+    def test_rounds_half_up_to_two_decimals(self):
+        # 12.345 KBps -> 12.35 KBps (round-half-up, not banker's rounding
+        # and not naive float rounding, which could give 12.34 instead)
+        assert format_speed(12345) == "12.35 KBps"
+
+    def test_rounding_can_push_into_the_next_unit(self):
+        # 999.996 KBps rounds to 1000.00 KBps, which should instead
+        # display as 1.00 MBps rather than showing "1000.00 KBps"
+        assert format_speed(999996) == "1.00 MBps"
+
+    def test_mbps_scale(self):
+        assert format_speed(2_500_000) == "2.50 MBps"
+
+    def test_gbps_scale(self):
+        assert format_speed(1_500_000_000) == "1.50 GBps"
+
+
 class TestDrawStatusOverlay:
     """Test suite for draw_status_overlay function"""
 
@@ -344,7 +378,7 @@ class TestDrawStatusOverlay:
         screen = pygame.Surface((400, 300))
         screen.fill((0, 0, 0))
 
-        draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_kbps=150.0)
+        draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_bytes_per_sec=150.0)
 
         # draw_status_overlay uses a 10px margin from the screen edge, so
         # probe just inside that margin rather than the literal corner pixel.
@@ -355,12 +389,12 @@ class TestDrawStatusOverlay:
         assert far_pixel == (0, 0, 0)
 
     def test_handles_missing_download_speed(self):
-        """Test that a None download_kbps (e.g. before the first successful
+        """Test that a None download_bytes_per_sec (e.g. before the first successful
         load) doesn't crash and still draws the box"""
         screen = pygame.Surface((400, 300))
         screen.fill((0, 0, 0))
 
-        draw_status_overlay(screen, self.font, paused=True, drive_ok=False, download_kbps=None)
+        draw_status_overlay(screen, self.font, paused=True, drive_ok=False, download_bytes_per_sec=None)
 
         corner_pixel = screen.get_at((388, 288))[:3]
         assert corner_pixel == (211, 211, 211)
@@ -371,7 +405,7 @@ class TestDrawStatusOverlay:
         screen.fill((0, 0, 0))
 
         # Should not raise, even though the box may not fully fit
-        draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_kbps=42.0)
+        draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_bytes_per_sec=42.0)
 
 
 class TestComputePatternRects:
@@ -847,12 +881,12 @@ class TestImageFetcherThreadThrottling:
         """A failed load should flag the drive as unreadable and clear the
         speed estimate, so the on-screen diagnostics reflect the stall"""
         self.controller.drive_ok = True
-        self.controller.download_kbps = 123.0
+        self.controller.download_bytes_per_sec = 123.0
 
         self._run_with_bounded_sleep(["/nonexistent/path/does_not_exist.jpg"])
 
         assert self.controller.drive_ok is False
-        assert self.controller.download_kbps is None
+        assert self.controller.download_bytes_per_sec is None
 
     def test_successful_load_marks_drive_ok_and_reports_speed(self):
         """A successful load should flag the drive as OK and compute a
@@ -863,7 +897,7 @@ class TestImageFetcherThreadThrottling:
             Image.new("RGB", (50, 50), color="blue").save(img_path)
 
             self.controller.drive_ok = False
-            self.controller.download_kbps = None
+            self.controller.download_bytes_per_sec = None
 
             dq = deque()
             lock = threading.Lock()
@@ -895,8 +929,8 @@ class TestImageFetcherThreadThrottling:
 
             assert not t.is_alive(), "fetcher thread did not stop after the bounded notify_all raised"
             assert self.controller.drive_ok is True
-            assert self.controller.download_kbps is not None
-            assert self.controller.download_kbps >= 0
+            assert self.controller.download_bytes_per_sec is not None
+            assert self.controller.download_bytes_per_sec >= 0
         finally:
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)

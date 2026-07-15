@@ -65,9 +65,9 @@ class SlideshowController:
         self.black_screen: bool = False
 
         # Diagnostics: whether the most recent photo load attempt succeeded,
-        # and the recent read speed (Kbps) over the last few successful loads.
+        # and the recent read speed (bytes/sec) over the last few successful loads.
         self.drive_ok: bool = True
-        self.download_kbps: Optional[float] = None
+        self.download_bytes_per_sec: Optional[float] = None
 
 
 def make_old_paper_surface(size):
@@ -262,18 +262,18 @@ def image_fetcher_thread(
                 recent_load_stats.clear()
                 with controller.lock:
                     controller.drive_ok = False
-                    controller.download_kbps = None
+                    controller.download_bytes_per_sec = None
                 time.sleep(0.5)
                 continue
 
             recent_load_stats.append((slide.load_bytes, slide.load_seconds))
             total_bytes = sum(b for b, _ in recent_load_stats)
             total_seconds = sum(s for _, s in recent_load_stats)
-            kbps = (total_bytes * 8 / 1000) / total_seconds if total_seconds > 0 else None
+            bytes_per_sec = total_bytes / total_seconds if total_seconds > 0 else None
 
             with controller.lock:
                 controller.drive_ok = True
-                controller.download_kbps = kbps
+                controller.download_bytes_per_sec = bytes_per_sec
 
             with not_full:
                 dq.append(slide)
@@ -343,11 +343,35 @@ def draw_slot_overlay(screen: pygame.Surface,
     screen.blit(text_surf, (box_rect.x + padding, box_rect.y + padding))
 
 
+def format_speed(bytes_per_sec: Optional[float]) -> str:
+    """
+    Format a bytes/sec figure with an auto-scaled unit (Bps, KBps, MBps,
+    GBps), rounded to 2 decimal places using round-half-up (not Python's
+    default round-half-to-even, and not raw float rounding, since both can
+    give surprising results right at a .xx5 boundary).
+    """
+    if bytes_per_sec is None:
+        return "-- Bps"
+
+    from decimal import Decimal, ROUND_HALF_UP
+
+    units = ["Bps", "KBps", "MBps", "GBps"]
+    value = bytes_per_sec
+
+    for i, unit in enumerate(units):
+        rounded = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if rounded < 1000 or i == len(units) - 1:
+            return f"{rounded} {unit}"
+        value /= 1000
+
+    return f"{value:.2f} {units[-1]}"  # unreachable, satisfies static analysis
+
+
 def draw_status_overlay(screen: pygame.Surface,
                         font: pygame.font.Font,
                         paused: bool,
                         drive_ok: bool,
-                        download_kbps: Optional[float]):
+                        download_bytes_per_sec: Optional[float]):
     """
     Draw a small diagnostics box in the bottom-right corner: Playing/Paused,
     drive mount health, and recent read speed. Drawn last (on top of
@@ -360,7 +384,7 @@ def draw_status_overlay(screen: pygame.Surface,
     lines = [
         "Paused" if paused else "Playing",
         "Drive: OK" if drive_ok else "Drive: DISCONNECTED",
-        f"{download_kbps:.0f} Kbps" if download_kbps is not None else "-- Kbps",
+        format_speed(download_bytes_per_sec),
     ]
 
     padding = 8
@@ -753,7 +777,7 @@ def render_loop(
             black_screen = controller.black_screen
             current_marks_snapshot = set(controller.current_marks)
             drive_ok = controller.drive_ok
-            download_kbps = controller.download_kbps
+            download_bytes_per_sec = controller.download_bytes_per_sec
 
         # Detect mark changes (compare snapshots)
         marks_changed = (current_marks_snapshot != last_marks)
@@ -977,7 +1001,7 @@ def render_loop(
 
             # Diagnostics overlay: drawn last, on top of everything
             # (including black-screen mode) so stalls are visible.
-            draw_status_overlay(screen, status_font, paused, drive_ok, download_kbps)
+            draw_status_overlay(screen, status_font, paused, drive_ok, download_bytes_per_sec)
 
             pygame.display.flip()
             last_status_render_time = now
