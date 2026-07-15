@@ -991,10 +991,36 @@ class TestReadFileList:
         """Test reading an empty file list"""
         with open(self.list_path, "w") as f:
             f.write("")
-        
+
         paths = read_file_list(self.list_path)
 
         assert len(paths) == 0
+
+    def test_shuffles_the_full_list_not_just_a_rotation(self):
+        """Test that the display order is a genuine shuffle (random.shuffle),
+        not the old behavior of rotating by a random offset"""
+        expected = [f"image{i}.jpg" for i in range(10)]
+        with open(self.list_path, "w") as f:
+            for name in expected:
+                f.write(name + "\n")
+
+        with patch("random.shuffle") as mock_shuffle:
+            read_file_list(self.list_path)
+
+        mock_shuffle.assert_called_once()
+        shuffled_arg = mock_shuffle.call_args[0][0]
+        assert sorted(shuffled_arg) == sorted(expected)
+
+    def test_shuffle_preserves_every_entry_exactly_once(self):
+        """Test that shuffling doesn't drop or duplicate any path"""
+        expected = [f"image{i}.jpg" for i in range(50)]
+        with open(self.list_path, "w") as f:
+            for name in expected:
+                f.write(name + "\n")
+
+        paths = read_file_list(self.list_path)
+
+        assert sorted(paths) == sorted(expected)
 
 
 class TestMainEmptyFileList:

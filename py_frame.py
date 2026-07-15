@@ -1182,9 +1182,11 @@ def read_file_list(list_path: str) -> List[str]:
     if not paths:
         return paths
 
-    # 👉 Rotate list by a random offset so we start at a random line
-    offset = random.randrange(len(paths))
-    paths = paths[offset:] + paths[:offset]
+    # Shuffle into a random display order, kept entirely in memory.
+    # Nothing downstream re-reads the source list file, so there's no need
+    # to persist the shuffled order to a temp file; it's just a plain list
+    # of path strings, cheap to hold even for very long lists.
+    random.shuffle(paths)
 
     return paths
 
