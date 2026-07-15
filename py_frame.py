@@ -69,6 +69,11 @@ class SlideshowController:
         self.drive_ok: bool = True
         self.download_bytes_per_sec: Optional[float] = None
 
+        # Diagnostics: rolling history of the last 20 load attempts (success
+        # or failure) for the load-time / size histogram. Each entry is
+        # {"success": bool, "bytes": int, "seconds": float}.
+        self.load_history: deque = deque(maxlen=20)
+
 
 def make_old_paper_surface(size):
     w, h = size
@@ -263,6 +268,7 @@ def image_fetcher_thread(
                 with controller.lock:
                     controller.drive_ok = False
                     controller.download_bytes_per_sec = None
+                    controller.load_history.append({"success": False, "bytes": 0, "seconds": 0.0})
                 time.sleep(0.5)
                 continue
 
@@ -274,6 +280,11 @@ def image_fetcher_thread(
             with controller.lock:
                 controller.drive_ok = True
                 controller.download_bytes_per_sec = bytes_per_sec
+                controller.load_history.append({
+                    "success": True,
+                    "bytes": slide.load_bytes,
+                    "seconds": slide.load_seconds,
+                })
 
             with not_full:
                 dq.append(slide)
@@ -371,12 +382,15 @@ def draw_status_overlay(screen: pygame.Surface,
                         font: pygame.font.Font,
                         paused: bool,
                         drive_ok: bool,
-                        download_bytes_per_sec: Optional[float]):
+                        download_bytes_per_sec: Optional[float]) -> pygame.Rect:
     """
     Draw a small diagnostics box in the bottom-right corner: Playing/Paused,
     drive mount health, and recent read speed. Drawn last (on top of
     everything, including black-screen mode) so stalls can be diagnosed
     without waiting for the next slide change.
+
+    Returns the box's rect so callers (e.g. the load-history histogram) can
+    lay out other diagnostics relative to it.
     """
     LIGHT_GRAY = (211, 211, 211)
     BLACK = (0, 0, 0)
@@ -409,6 +423,83 @@ def draw_status_overlay(screen: pygame.Surface,
     for surf in text_surfaces:
         screen.blit(surf, (box_rect.x + padding, y))
         y += surf.get_height() + line_spacing
+
+    return box_rect
+
+
+def draw_load_history_overlay(screen: pygame.Surface,
+                              status_box_rect: pygame.Rect,
+                              load_history: list):
+    """
+    Draw a dark-gray histogram strip to the left of the status box, spanning
+    the rest of the available width. Each of the last 20 load attempts gets
+    a slot: a green bar (load time) and blue bar (size) side by side, each
+    scaled relative to the max of its own metric across the current window,
+    or a single full-height red bar if that attempt failed. Newest is on the
+    right, oldest on the left; slots are right-aligned so the strip fills in
+    from the right before the window has 20 entries.
+    """
+    DARK_GRAY = (60, 60, 60)
+    GREEN = (60, 200, 60)
+    BLUE = (70, 140, 220)
+    RED = (220, 60, 60)
+
+    margin = 10
+    gap = 10
+    rect = pygame.Rect(
+        margin,
+        status_box_rect.y,
+        status_box_rect.x - gap - margin,
+        status_box_rect.height,
+    )
+
+    if rect.width <= 0:
+        return
+
+    pygame.draw.rect(screen, DARK_GRAY, rect)
+
+    num_slots = 20
+    slot_w = rect.width / num_slots
+    top_padding = 6
+    max_bar_height = rect.height - top_padding
+
+    successful = [h for h in load_history if h["success"]]
+    max_seconds = max((h["seconds"] for h in successful), default=0)
+    max_bytes = max((h["bytes"] for h in successful), default=0)
+
+    empty_slots = num_slots - len(load_history)
+
+    for i, entry in enumerate(load_history):
+        slot_index = empty_slots + i
+        slot_x = rect.x + slot_index * slot_w
+
+        if not entry["success"]:
+            bar_rect = pygame.Rect(
+                int(slot_x + slot_w * 0.1),
+                rect.y + top_padding,
+                int(slot_w * 0.8),
+                int(max_bar_height),
+            )
+            pygame.draw.rect(screen, RED, bar_rect)
+            continue
+
+        time_height = int(max_bar_height * (entry["seconds"] / max_seconds)) if max_seconds > 0 else 0
+        green_rect = pygame.Rect(
+            int(slot_x + slot_w * 0.1),
+            rect.bottom - time_height,
+            int(slot_w * 0.35),
+            time_height,
+        )
+        pygame.draw.rect(screen, GREEN, green_rect)
+
+        size_height = int(max_bar_height * (entry["bytes"] / max_bytes)) if max_bytes > 0 else 0
+        blue_rect = pygame.Rect(
+            int(slot_x + slot_w * 0.5),
+            rect.bottom - size_height,
+            int(slot_w * 0.35),
+            size_height,
+        )
+        pygame.draw.rect(screen, BLUE, blue_rect)
 
 
 def build_blurred_background(screen_size, slide_rects):
@@ -778,6 +869,7 @@ def render_loop(
             current_marks_snapshot = set(controller.current_marks)
             drive_ok = controller.drive_ok
             download_bytes_per_sec = controller.download_bytes_per_sec
+            load_history_snapshot = list(controller.load_history)
 
         # Detect mark changes (compare snapshots)
         marks_changed = (current_marks_snapshot != last_marks)
@@ -1001,7 +1093,8 @@ def render_loop(
 
             # Diagnostics overlay: drawn last, on top of everything
             # (including black-screen mode) so stalls are visible.
-            draw_status_overlay(screen, status_font, paused, drive_ok, download_bytes_per_sec)
+            status_box_rect = draw_status_overlay(screen, status_font, paused, drive_ok, download_bytes_per_sec)
+            draw_load_history_overlay(screen, status_box_rect, load_history_snapshot)
 
             pygame.display.flip()
             last_status_render_time = now

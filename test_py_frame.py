@@ -23,6 +23,7 @@ from py_frame import (
     blit_scaled,
     draw_slot_overlay,
     draw_status_overlay,
+    draw_load_history_overlay,
     format_speed,
     compute_pattern_rects,
     load_exclusions,
@@ -122,6 +123,8 @@ class TestSlideshowController:
         assert controller.black_screen is False
         assert controller.drive_ok is True
         assert controller.download_bytes_per_sec is None
+        assert list(controller.load_history) == []
+        assert controller.load_history.maxlen == 20
 
     def test_marks_management(self):
         """Test marking and unmarking slides"""
@@ -406,6 +409,101 @@ class TestDrawStatusOverlay:
 
         # Should not raise, even though the box may not fully fit
         draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_bytes_per_sec=42.0)
+
+    def test_returns_its_box_rect(self):
+        """Test that the box's rect is returned, so callers can lay out
+        other diagnostics (e.g. the load-history histogram) relative to it"""
+        screen = pygame.Surface((400, 300))
+
+        box_rect = draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_bytes_per_sec=42.0)
+
+        assert isinstance(box_rect, pygame.Rect)
+        assert box_rect.right == 400 - 10  # 10px margin from the right edge
+        assert box_rect.bottom == 300 - 10  # 10px margin from the bottom edge
+
+
+class TestDrawLoadHistoryOverlay:
+    """Test suite for draw_load_history_overlay function"""
+
+    DARK_GRAY = (60, 60, 60)
+    GREEN = (60, 200, 60)
+    BLUE = (70, 140, 220)
+    RED = (220, 60, 60)
+
+    def setup_method(self):
+        """Initialize pygame"""
+        pygame.init()
+        # screen (300, 200) + status_box_rect (200, 150, 90, 50) gives a
+        # histogram rect of (10, 150, 180, 50) -> slot width exactly 9.0,
+        # which keeps the expected pixel math clean and non-fragile.
+        self.screen = pygame.Surface((300, 200))
+        self.screen.fill((0, 0, 0))
+        self.status_box_rect = pygame.Rect(200, 150, 90, 50)
+
+    def teardown_method(self):
+        """Clean up pygame"""
+        pygame.quit()
+
+    def test_empty_history_draws_only_background(self):
+        """Test that an empty history draws the dark-gray strip with no bars"""
+        draw_load_history_overlay(self.screen, self.status_box_rect, [])
+
+        for x, y in [(15, 170), (100, 170), (185, 170)]:
+            assert self.screen.get_at((x, y))[:3] == self.DARK_GRAY
+
+    def test_single_success_draws_full_height_green_and_blue_bars(self):
+        """Test that a lone successful entry (which is its own max) fills
+        the bar to full height, in the rightmost (newest) slot"""
+        history = [{"success": True, "bytes": 1000, "seconds": 0.5}]
+
+        draw_load_history_overlay(self.screen, self.status_box_rect, history)
+
+        assert self.screen.get_at((182, 158))[:3] == self.GREEN
+        assert self.screen.get_at((186, 158))[:3] == self.BLUE
+
+    def test_failure_draws_full_height_red_bar(self):
+        """Test that a failed load draws a single red bar spanning most of
+        the slot, at full height (top to bottom of the strip)"""
+        history = [{"success": False, "bytes": 0, "seconds": 0.0}]
+
+        draw_load_history_overlay(self.screen, self.status_box_rect, history)
+
+        assert self.screen.get_at((184, 158))[:3] == self.RED
+        assert self.screen.get_at((184, 198))[:3] == self.RED
+
+    def test_bars_scale_relative_to_the_window_max(self):
+        """Test that an entry with half the bytes of the window's max
+        produces a visibly shorter blue bar"""
+        history = [
+            {"success": True, "bytes": 500, "seconds": 0.1},   # older, half the size
+            {"success": True, "bytes": 1000, "seconds": 0.1},  # newest, the max
+        ]
+
+        draw_load_history_overlay(self.screen, self.status_box_rect, history)
+
+        # Near the top of the strip: only the full-height (newest) bar reaches
+        # this high; the half-height (older) bar should not have colored it.
+        assert self.screen.get_at((186, 160))[:3] == self.BLUE
+        assert self.screen.get_at((177, 160))[:3] == self.DARK_GRAY
+
+    def test_partial_history_right_aligns_leaving_left_slots_empty(self):
+        """Test that with fewer than 20 entries, unused slots on the left
+        stay as plain background (newest is always on the right)"""
+        history = [{"success": True, "bytes": 1000, "seconds": 0.5}] * 3
+
+        draw_load_history_overlay(self.screen, self.status_box_rect, history)
+
+        # Leftmost slot (slot 0) should be untouched background
+        assert self.screen.get_at((12, 170))[:3] == self.DARK_GRAY
+
+    def test_no_space_left_of_status_box_does_not_crash(self):
+        """Test that a status box covering nearly the whole width degrades
+        gracefully (no space left to draw) instead of raising"""
+        status_box_rect = pygame.Rect(5, 150, 290, 50)
+
+        draw_load_history_overlay(self.screen, status_box_rect, [
+            {"success": True, "bytes": 1000, "seconds": 0.5}
+        ])
 
 
 class TestComputePatternRects:
@@ -887,6 +985,7 @@ class TestImageFetcherThreadThrottling:
 
         assert self.controller.drive_ok is False
         assert self.controller.download_bytes_per_sec is None
+        assert list(self.controller.load_history)[-1] == {"success": False, "bytes": 0, "seconds": 0.0}
 
     def test_successful_load_marks_drive_ok_and_reports_speed(self):
         """A successful load should flag the drive as OK and compute a
@@ -931,6 +1030,11 @@ class TestImageFetcherThreadThrottling:
             assert self.controller.drive_ok is True
             assert self.controller.download_bytes_per_sec is not None
             assert self.controller.download_bytes_per_sec >= 0
+
+            last_entry = list(self.controller.load_history)[-1]
+            assert last_entry["success"] is True
+            assert last_entry["bytes"] == os.path.getsize(img_path)
+            assert last_entry["seconds"] >= 0
         finally:
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
