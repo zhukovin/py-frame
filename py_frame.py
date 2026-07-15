@@ -1,7 +1,7 @@
 import threading
 from collections import deque
 from dataclasses import dataclass
-from itertools import islice, product
+from itertools import islice
 from typing import List, Tuple, Literal
 
 import pygame
@@ -890,76 +890,6 @@ def render_loop(
 
 
 # ============================================================
-# Tests for extract_pattern_from_deque logic
-# ============================================================
-
-class DummySlide(Slide):
-    """Slide subclass for testing, ignoring actual pygame surfaces."""
-
-    def __init__(self, orientation: Orientation):
-        self.path = ""
-        self.surface = None  # type: ignore
-        self.orientation = orientation
-
-
-def test_extract_pattern_all_len5():
-    """
-    For all 5-length orientation sequences starting with P,
-    check that pattern extraction:
-      - picks PPP if possible
-      - else PPLLL if possible
-      - else PLLL if possible
-       - extracts correct counts and returns remaining correctly.
-    """
-    for bits in product("PL", repeat=5):
-        seq = "".join(bits)
-        if seq[0] != "P":
-            continue
-
-        # Determine expected pattern type and needed counts
-        cP = seq.count("P")
-        cL = seq.count("L")
-
-        if cP >= 3:
-            exp_type = 1
-            needP, needL = 3, 0
-        elif cP >= 2 and cL >= 3:
-            exp_type = 2
-            needP, needL = 2, 3
-        elif cP >= 1 and cL >= 3:
-            exp_type = 3
-            needP, needL = 1, 3
-        else:
-            raise AssertionError(f"Unexpected no-pattern case for {seq}")
-
-        dq = deque(DummySlide(o) for o in seq)
-        extracted, out_type = extract_pattern_from_deque(dq)
-
-        assert out_type == exp_type, f"{seq}: expected type {exp_type}, got {out_type}"
-        assert sum(1 for s in extracted if s.orientation == "P") == needP
-        assert sum(1 for s in extracted if s.orientation == "L") == needL
-
-        # simulate expected remaining
-        window = list(seq[:5])
-        p_left, l_left = needP, needL
-        unused = []
-        for ch in window:
-            if ch == "P" and p_left > 0:
-                p_left -= 1
-            elif ch == "L" and l_left > 0:
-                l_left -= 1
-            else:
-                unused.append(ch)
-            if p_left == 0 and l_left == 0:
-                break
-        expected_remaining = unused + list(seq[5:])
-        actual_remaining = [s.orientation for s in dq]
-
-        assert expected_remaining == actual_remaining, \
-            f"{seq}: expected remaining {expected_remaining}, got {actual_remaining}"
-
-
-# ============================================================
 # Main entry
 # ============================================================
 
@@ -1000,6 +930,10 @@ def main():
     list_path = sys.argv[1]
     file_paths = read_file_list(list_path)
 
+    if not file_paths:
+        print(f"No .jpg/.jpeg entries found in {list_path}; nothing to display.")
+        sys.exit(1)
+
     shared_deque: deque[Slide] = deque()
     lock = threading.Lock()
     not_full = threading.Condition(lock)
@@ -1016,9 +950,6 @@ def main():
         daemon=True,
     )
     fetcher.start()
-
-    # Optional: run pattern tests (for logic sanity)
-    # test_extract_pattern_all_len5()
 
     # Start render loop in main thread
     render_loop(shared_deque, lock, not_full, producer_done, controller, seconds_to_display)

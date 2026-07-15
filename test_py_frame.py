@@ -14,11 +14,9 @@ from PIL import Image
 
 # Import the test function and dependencies from py_frame
 from py_frame import (
-    DummySlide,
     Slide,
     SlideshowController,
     extract_pattern_from_deque,
-    test_extract_pattern_all_len5,
     make_old_paper_surface,
     load_slide,
     smoothscale_safe,
@@ -32,13 +30,75 @@ from py_frame import (
     downscale_slides_to_screen,
     read_file_list,
     image_fetcher_thread,
+    main,
     Orientation
 )
 
 
-def test_extract_pattern_existing():
-    """Run the existing test from py_frame.py"""
-    test_extract_pattern_all_len5()
+class DummySlide(Slide):
+    """Slide subclass for testing, ignoring actual pygame surfaces."""
+
+    def __init__(self, orientation: Orientation):
+        self.path = ""
+        self.surface = None  # type: ignore
+        self.orientation = orientation
+
+
+def test_extract_pattern_all_len5():
+    """
+    For all 5-length orientation sequences starting with P,
+    check that pattern extraction:
+      - picks PPP if possible
+      - else PPLLL if possible
+      - else PLLL if possible
+       - extracts correct counts and returns remaining correctly.
+    """
+    for bits in product("PL", repeat=5):
+        seq = "".join(bits)
+        if seq[0] != "P":
+            continue
+
+        # Determine expected pattern type and needed counts
+        cP = seq.count("P")
+        cL = seq.count("L")
+
+        if cP >= 3:
+            exp_type = 1
+            needP, needL = 3, 0
+        elif cP >= 2 and cL >= 3:
+            exp_type = 2
+            needP, needL = 2, 3
+        elif cP >= 1 and cL >= 3:
+            exp_type = 3
+            needP, needL = 1, 3
+        else:
+            raise AssertionError(f"Unexpected no-pattern case for {seq}")
+
+        dq = deque(DummySlide(o) for o in seq)
+        extracted, out_type = extract_pattern_from_deque(dq)
+
+        assert out_type == exp_type, f"{seq}: expected type {exp_type}, got {out_type}"
+        assert sum(1 for s in extracted if s.orientation == "P") == needP
+        assert sum(1 for s in extracted if s.orientation == "L") == needL
+
+        # simulate expected remaining
+        window = list(seq[:5])
+        p_left, l_left = needP, needL
+        unused = []
+        for ch in window:
+            if ch == "P" and p_left > 0:
+                p_left -= 1
+            elif ch == "L" and l_left > 0:
+                l_left -= 1
+            else:
+                unused.append(ch)
+            if p_left == 0 and l_left == 0:
+                break
+        expected_remaining = unused + list(seq[5:])
+        actual_remaining = [s.orientation for s in dq]
+
+        assert expected_remaining == actual_remaining, \
+            f"{seq}: expected remaining {expected_remaining}, got {actual_remaining}"
 
 
 class TestSlideshowController:
@@ -619,6 +679,30 @@ class TestReadFileList:
         paths = read_file_list(self.list_path)
 
         assert len(paths) == 0
+
+
+class TestMainEmptyFileList:
+    """Test suite for main()'s handling of an empty/invalid photo list"""
+
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.list_path = os.path.join(self.temp_dir, "empty.list")
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_main_exits_when_no_valid_photos(self):
+        """main() should print an error and exit(1) instead of silently
+        starting a slideshow with nothing to show"""
+        with open(self.list_path, "w") as f:
+            f.write("not_a_photo.txt\n")
+
+        with patch("sys.argv", ["py_frame.py", self.list_path]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 1
 
 
 class _StopFetcher(Exception):
