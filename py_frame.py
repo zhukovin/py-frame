@@ -94,6 +94,17 @@ def make_old_paper_surface(size):
     return surf
 
 
+class ImageDecodeError(Exception):
+    """
+    Raised when a file was read successfully but its image content couldn't
+    be decoded (corrupt file, unsupported format, etc). Deliberately
+    distinct from I/O errors raised while reading the raw bytes, so callers
+    can tell "one bad file" apart from "the drive/NFS mount is unreachable"
+    instead of conflating both into the same failure signal.
+    """
+    pass
+
+
 def load_slide(path: str) -> Slide:
     """
     Load a slide from disk, rotate it according to EXIF orientation,
@@ -105,35 +116,42 @@ def load_slide(path: str) -> Slide:
 
     # 1) Read the raw bytes ourselves (timed) so callers can measure
     #    disk/NFS read speed separately from JPEG decode (CPU) time.
+    #    Exceptions here (missing file, permission error, stale/disconnected
+    #    NFS mount) are real I/O problems and propagate as-is.
     t0 = time.monotonic()
     with open(path, "rb") as f:
         raw = f.read()
     load_seconds = time.monotonic() - t0
     load_bytes = len(raw)
 
-    # 2) Load with Pillow from the in-memory bytes
-    img = Image.open(io.BytesIO(raw))
+    # 2) Decode with Pillow. Failures here mean the file itself is
+    #    corrupt/unsupported, not that the drive is unreachable, so they're
+    #    wrapped in ImageDecodeError rather than left as a bare Exception.
+    try:
+        img = Image.open(io.BytesIO(raw))
 
-    # 3) Apply EXIF orientation (rotates/flip as needed)
-    img = ImageOps.exif_transpose(img)
+        # Apply EXIF orientation (rotates/flip as needed)
+        img = ImageOps.exif_transpose(img)
 
-    # 4) Classify after rotation
-    width, height = img.size
-    orientation: Orientation = "P" if height > width else "L"
+        # Classify after rotation
+        width, height = img.size
+        orientation: Orientation = "P" if height > width else "L"
 
-    # 5) Ensure mode is suitable for pygame
-    if img.mode not in ("RGB", "RGBA"):
-        img = img.convert("RGB")
+        # Ensure mode is suitable for pygame
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
 
-    mode = img.mode
-    size = img.size
-    data = img.tobytes()
+        mode = img.mode
+        size = img.size
+        data = img.tobytes()
 
-    # 6) Convert to pygame surface
-    if mode == "RGBA":
-        surface = pygame.image.fromstring(data, size, mode).convert_alpha()
-    else:  # "RGB"
-        surface = pygame.image.fromstring(data, size, mode).convert()
+        # Convert to pygame surface
+        if mode == "RGBA":
+            surface = pygame.image.fromstring(data, size, mode).convert_alpha()
+        else:  # "RGB"
+            surface = pygame.image.fromstring(data, size, mode).convert()
+    except Exception as e:
+        raise ImageDecodeError(f"failed to decode {path}: {e}") from e
 
     return Slide(
         path=path,
@@ -262,6 +280,15 @@ def image_fetcher_thread(
 
             try:
                 slide = load_slide(path)
+            except ImageDecodeError as e:
+                # A bad/corrupt file, not a drive problem: record the failed
+                # attempt for the histogram, but don't flag the drive down
+                # or discard the legitimate rolling speed average.
+                print(f"Skipping unreadable image {path}: {e}")
+                with controller.lock:
+                    controller.load_history.append({"success": False, "bytes": 0, "seconds": 0.0})
+                time.sleep(0.5)
+                continue
             except Exception as e:
                 print(f"Failed to load {path}: {e}")
                 recent_load_stats.clear()
@@ -746,23 +773,32 @@ def finalize_exclusions(controller: SlideshowController):
         #    and reclassify (or drop) entries that no longer fit their
         #    pattern's required P/L composition.
         if controller.history:
+            old_index = controller.history_index
             new_history: list[tuple[list[Slide], int]] = []
-            for slides, ptype in controller.history:
+            # Track where the entry the user was actually viewing ends up,
+            # so history_index can follow it instead of drifting onto a
+            # different entry when something *earlier* in the list gets
+            # dropped (a plain index clamp only guards the tail, not this).
+            new_index_for_old_index: Optional[int] = None
+
+            for i, (slides, ptype) in enumerate(controller.history):
                 filtered = [s for s in slides if s.path not in controller.excluded_paths]
                 new_ptype = reclassify_pattern_type(filtered, ptype)
                 if new_ptype is not None:
+                    if i == old_index:
+                        new_index_for_old_index = len(new_history)
                     new_history.append((filtered, new_ptype))
 
             controller.history = new_history
 
-            # Fix history_index so it stays in range, or becomes -1 if history is empty
-            if controller.history:
-                controller.history_index = min(
-                    controller.history_index,
-                    len(controller.history) - 1,
-                    )
-            else:
+            if not controller.history:
                 controller.history_index = -1
+            elif new_index_for_old_index is not None:
+                # The viewed entry survived (possibly at a new position).
+                controller.history_index = new_index_for_old_index
+            else:
+                # The viewed entry itself was dropped; clamp into range.
+                controller.history_index = min(old_index, len(controller.history) - 1)
 
     # 3) Append newly excluded paths to the exclusions file (outside the lock)
     if new_paths:

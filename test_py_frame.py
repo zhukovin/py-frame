@@ -19,6 +19,7 @@ from py_frame import (
     extract_pattern_from_deque,
     make_old_paper_surface,
     load_slide,
+    ImageDecodeError,
     smoothscale_safe,
     blit_scaled,
     draw_slot_overlay,
@@ -261,6 +262,28 @@ class TestLoadSlide:
 
         assert slide.load_bytes == os.path.getsize(img_path)
         assert slide.load_seconds >= 0
+
+    def test_corrupt_file_raises_image_decode_error(self):
+        """A file that reads fine but isn't a valid image should raise
+        ImageDecodeError, not a bare exception, so callers can tell a bad
+        file apart from a real drive/NFS problem"""
+        bad_path = os.path.join(self.temp_dir, "corrupt.jpg")
+        with open(bad_path, "wb") as f:
+            f.write(b"this is not a real jpeg file")
+
+        with pytest.raises(ImageDecodeError):
+            load_slide(bad_path)
+
+    def test_missing_file_raises_plain_oserror_not_image_decode_error(self):
+        """A missing file fails at the read stage (before decoding is even
+        attempted), so it must NOT be wrapped as ImageDecodeError -- callers
+        rely on that distinction to tell "bad file" apart from "can't reach
+        the drive at all\""""
+        missing_path = os.path.join(self.temp_dir, "does_not_exist.jpg")
+
+        with pytest.raises(OSError) as exc_info:
+            load_slide(missing_path)
+        assert not isinstance(exc_info.value, ImageDecodeError)
 
 
 class TestSmoothscaleSafe:
@@ -783,6 +806,88 @@ class TestFinalizeExclusions:
         assert self.controller.history == []
         assert self.controller.history_index == -1
 
+    def test_finalize_history_index_follows_viewed_entry_when_earlier_entry_dropped(self):
+        """If an entry BEFORE the currently-viewed one gets dropped, history_index
+        should follow the viewed entry to its new position, not drift onto
+        whatever entry now occupies the old numeric index"""
+        shared = Slide(path="shared.jpg", surface=pygame.Surface((10, 20)), orientation="P")
+        l1 = Slide(path="l1.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+        l2 = Slide(path="l2.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+        l3 = Slide(path="l3.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+
+        # Entry A: PLLL whose sole portrait is the same photo about to be
+        # excluded from the currently-viewed screen -- A should get dropped.
+        entry_a_slides = [
+            Slide(path="shared.jpg", surface=pygame.Surface((10, 20)), orientation="P"),
+            l1, l2, l3,
+        ]
+
+        # Entry B: the currently-viewed screen, a PPP with "shared.jpg" as
+        # one of three portraits -- degrades gracefully (stays type 1) and
+        # survives the exclusion.
+        p2 = Slide(path="p2.jpg", surface=pygame.Surface((10, 20)), orientation="P")
+        p3 = Slide(path="p3.jpg", surface=pygame.Surface((10, 20)), orientation="P")
+        entry_b_slides = [shared, p2, p3]
+
+        # Entry C: unrelated, untouched.
+        entry_c_slides = [
+            Slide(path="c1.jpg", surface=pygame.Surface((10, 20)), orientation="P"),
+            Slide(path="c2.jpg", surface=pygame.Surface((10, 20)), orientation="P"),
+            Slide(path="c3.jpg", surface=pygame.Surface((10, 20)), orientation="P"),
+        ]
+
+        self.controller.current_slides = entry_b_slides
+        self.controller.current_marks = {0}  # mark "shared.jpg"
+        self.controller.history = [
+            (entry_a_slides, 3),
+            (entry_b_slides, 1),
+            (entry_c_slides, 1),
+        ]
+        self.controller.history_index = 1  # viewing B
+
+        finalize_exclusions(self.controller)
+
+        # A should have been dropped (its only P was excluded, leaving 3 L's,
+        # which fits no pattern)
+        assert len(self.controller.history) == 2
+        remaining_paths = [[s.path for s in slides] for slides, _ in self.controller.history]
+        assert remaining_paths[0] == ["p2.jpg", "p3.jpg"]  # B, shared.jpg removed
+        assert remaining_paths[1] == ["c1.jpg", "c2.jpg", "c3.jpg"]  # C, untouched
+
+        # history_index must still point at B (now at position 0), not
+        # drift onto C just because C used to be at index 2.
+        assert self.controller.history_index == 0
+
+    def test_finalize_history_index_clamps_when_viewed_entry_itself_is_dropped(self):
+        """If the currently-viewed entry itself no longer fits any pattern
+        after exclusion, history_index should clamp into the remaining
+        range rather than reference a slot that no longer exists"""
+        p1 = Slide(path="p1.jpg", surface=pygame.Surface((10, 20)), orientation="P")
+        l1 = Slide(path="l1.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+        l2 = Slide(path="l2.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+        l3 = Slide(path="l3.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+
+        entry_a_slides = [
+            Slide(path="a1.jpg", surface=pygame.Surface((10, 20)), orientation="P"),
+            Slide(path="a2.jpg", surface=pygame.Surface((10, 20)), orientation="P"),
+            Slide(path="a3.jpg", surface=pygame.Surface((10, 20)), orientation="P"),
+        ]
+        entry_b_slides = [p1, l1, l2, l3]  # PLLL, the currently-viewed screen
+
+        self.controller.current_slides = entry_b_slides
+        self.controller.current_marks = {0}  # mark the sole P on this screen
+        self.controller.history = [
+            (entry_a_slides, 1),
+            (entry_b_slides, 3),
+        ]
+        self.controller.history_index = 1  # viewing B
+
+        finalize_exclusions(self.controller)
+
+        # B is dropped (0 P's, 3 L's fits no pattern); only A remains
+        assert len(self.controller.history) == 1
+        assert self.controller.history_index == 0
+
 
 class TestDownscaleSlideToScreen:
     """Test suite for downscale_slide_to_screen function"""
@@ -1001,6 +1106,31 @@ class TestImageFetcherThreadThrottling:
         assert self.controller.drive_ok is False
         assert self.controller.download_bytes_per_sec is None
         assert list(self.controller.load_history)[-1] == {"success": False, "bytes": 0, "seconds": 0.0}
+
+    def test_corrupt_file_does_not_mark_drive_disconnected(self):
+        """A bad/corrupt file (readable, but not a valid image) should NOT
+        be reported as a drive disconnect -- only genuine I/O failures
+        (missing file, unreadable mount, etc) should flip drive_ok"""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            bad_path = os.path.join(temp_dir, "corrupt.jpg")
+            with open(bad_path, "wb") as f:
+                f.write(b"not a real jpeg")
+
+            self.controller.drive_ok = True
+            self.controller.download_bytes_per_sec = 123.0
+
+            self._run_with_bounded_sleep([bad_path])
+
+            # Still recorded as a failed attempt for the histogram...
+            assert list(self.controller.load_history)[-1] == {"success": False, "bytes": 0, "seconds": 0.0}
+            # ...but the drive itself is not reported as disconnected, and
+            # the existing speed estimate survives (unlike a real I/O failure).
+            assert self.controller.drive_ok is True
+            assert self.controller.download_bytes_per_sec == 123.0
+        finally:
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_successful_load_marks_drive_ok_and_reports_speed(self):
         """A successful load should flag the drive as OK and compute a
