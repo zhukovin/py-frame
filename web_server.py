@@ -28,11 +28,15 @@ def create_app(controller: "SlideshowController") -> Flask:
     @app.route("/api/mark", methods=["POST"])
     def api_mark():
         data = request.json or {}
-        slot = int(data.get("slot", -1))
-        if not (0 <= slot < 5):
+        try:
+            slot = int(data.get("slot", -1))
+        except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "invalid slot"}), 400
 
         with controller.lock:
+            if not (0 <= slot < len(controller.current_slides)):
+                return jsonify({"ok": False, "error": "invalid slot"}), 400
+
             if slot in controller.current_marks:
                 controller.current_marks.remove(slot)
             else:
@@ -43,10 +47,14 @@ def create_app(controller: "SlideshowController") -> Flask:
     def api_command():
         data = request.json or {}
         cmd = data.get("cmd")
-        steps = int(data.get("steps", 1))
 
         if cmd not in ("next", "prev", "pause", "play", "screen_off", "screen_on"):
             return jsonify({"ok": False, "error": "bad cmd"}), 400
+
+        try:
+            steps = int(data.get("steps", 1))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "invalid steps"}), 400
 
         with controller.lock:
             if cmd in ("pause", "play"):

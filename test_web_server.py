@@ -73,46 +73,76 @@ class TestWebServer:
         assert data['paused'] is True
         assert data['black'] is True
     
+    def _add_current_slides(self, count, orientation="L"):
+        self.controller.current_slides = [
+            Slide(path=f"test{i}.jpg", surface=pygame.Surface((10, 10)), orientation=orientation)
+            for i in range(count)
+        ]
+
     def test_api_mark_valid_slot(self):
         """Test /api/mark endpoint with valid slot"""
+        self._add_current_slides(3)
         response = self.client.post('/api/mark', json={'slot': 2})
-        
+
         assert response.status_code == 200
         data = response.get_json()
         assert data['ok'] is True
         assert 2 in self.controller.current_marks
-    
+
     def test_api_mark_toggle(self):
         """Test /api/mark toggles marking"""
+        self._add_current_slides(2)
+
         # Mark slot 1
         self.client.post('/api/mark', json={'slot': 1})
         assert 1 in self.controller.current_marks
-        
+
         # Unmark slot 1
         self.client.post('/api/mark', json={'slot': 1})
         assert 1 not in self.controller.current_marks
-    
+
     def test_api_mark_invalid_slot_negative(self):
         """Test /api/mark with invalid negative slot"""
+        self._add_current_slides(1)
         response = self.client.post('/api/mark', json={'slot': -1})
-        
+
         assert response.status_code == 400
         data = response.get_json()
         assert data['ok'] is False
         assert 'error' in data
-    
+
     def test_api_mark_invalid_slot_too_large(self):
-        """Test /api/mark with slot >= 5"""
-        response = self.client.post('/api/mark', json={'slot': 5})
-        
+        """Test /api/mark with a slot beyond the number of current slides"""
+        self._add_current_slides(3)
+        response = self.client.post('/api/mark', json={'slot': 3})
+
         assert response.status_code == 400
         data = response.get_json()
         assert data['ok'] is False
-    
+
+    def test_api_mark_no_current_slides(self):
+        """Test /api/mark rejects any slot when there are no current slides
+        (guards against marking a slot with no photo behind it)"""
+        response = self.client.post('/api/mark', json={'slot': 0})
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data['ok'] is False
+
+    def test_api_mark_non_numeric_slot(self):
+        """Test /api/mark with a non-numeric slot returns 400 instead of crashing"""
+        self._add_current_slides(3)
+        response = self.client.post('/api/mark', json={'slot': 'abc'})
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data['ok'] is False
+
     def test_api_mark_missing_slot(self):
         """Test /api/mark with missing slot parameter"""
+        self._add_current_slides(3)
         response = self.client.post('/api/mark', json={})
-        
+
         assert response.status_code == 400
     
     def test_api_command_next(self):
@@ -179,12 +209,20 @@ class TestWebServer:
     def test_api_command_invalid(self):
         """Test /api/command with invalid command"""
         response = self.client.post('/api/command', json={'cmd': 'invalid_cmd'})
-        
+
         assert response.status_code == 400
         data = response.get_json()
         assert data['ok'] is False
         assert 'error' in data
-    
+
+    def test_api_command_non_numeric_steps(self):
+        """Test /api/command with a non-numeric steps value returns 400 instead of crashing"""
+        response = self.client.post('/api/command', json={'cmd': 'next', 'steps': 'abc'})
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data['ok'] is False
+
     def test_api_command_missing_cmd(self):
         """Test /api/command with missing cmd parameter"""
         response = self.client.post('/api/command', json={})
