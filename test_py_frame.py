@@ -8,6 +8,7 @@ from itertools import product
 import pygame
 import os
 import tempfile
+import threading
 from unittest.mock import Mock, MagicMock, patch
 from PIL import Image
 
@@ -30,6 +31,7 @@ from py_frame import (
     downscale_slide_to_screen,
     downscale_slides_to_screen,
     read_file_list,
+    image_fetcher_thread,
     Orientation
 )
 
@@ -615,8 +617,76 @@ class TestReadFileList:
             f.write("")
         
         paths = read_file_list(self.list_path)
-        
+
         assert len(paths) == 0
+
+
+class _StopFetcher(Exception):
+    """Sentinel used to break image_fetcher_thread's infinite loop in tests."""
+    pass
+
+
+class TestImageFetcherThreadThrottling:
+    """Test suite for image_fetcher_thread's busy-loop throttling on skip/failure paths"""
+
+    def setup_method(self):
+        self.controller = SlideshowController()
+
+    def _run_with_bounded_sleep(self, file_paths, max_calls=3):
+        """Run image_fetcher_thread with time.sleep mocked to raise after
+        max_calls, so the otherwise-infinite loop stops deterministically."""
+        sleep_calls = []
+
+        def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+            if len(sleep_calls) >= max_calls:
+                raise _StopFetcher()
+
+        dq = deque()
+        lock = threading.Lock()
+        not_full = threading.Condition(lock)
+        producer_done = threading.Event()
+
+        def quiet_excepthook(args):
+            if args.exc_type is not _StopFetcher:
+                threading.__excepthook__(args)
+
+        prev_excepthook = threading.excepthook
+        threading.excepthook = quiet_excepthook
+        try:
+            with patch("time.sleep", side_effect=fake_sleep):
+                t = threading.Thread(
+                    target=image_fetcher_thread,
+                    args=(file_paths, dq, lock, not_full, producer_done, self.controller, 5),
+                    daemon=True,
+                )
+                t.start()
+                t.join(timeout=2)
+        finally:
+            threading.excepthook = prev_excepthook
+
+        assert not t.is_alive(), "fetcher thread did not stop after the bounded sleep raised"
+        return sleep_calls, dq
+
+    def test_excluded_path_throttles_instead_of_busy_looping(self):
+        """All paths excluded -> should sleep between skips, not spin"""
+        self.controller.excluded_paths.add("excluded.jpg")
+
+        sleep_calls, dq = self._run_with_bounded_sleep(["excluded.jpg"])
+
+        assert sleep_calls, "expected time.sleep to be called while skipping excluded paths"
+        assert all(c == 0.3 for c in sleep_calls)
+        assert len(dq) == 0
+
+    def test_load_failure_throttles_instead_of_busy_looping(self):
+        """Unloadable path (e.g. missing file) -> should sleep between retries, not spin"""
+        sleep_calls, dq = self._run_with_bounded_sleep(
+            ["/nonexistent/path/does_not_exist.jpg"]
+        )
+
+        assert sleep_calls, "expected time.sleep to be called after a failed load"
+        assert all(c == 0.5 for c in sleep_calls)
+        assert len(dq) == 0
 
 
 if __name__ == "__main__":

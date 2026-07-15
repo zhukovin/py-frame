@@ -197,6 +197,8 @@ def image_fetcher_thread(
         controller: SlideshowController,
         max_size: int = 5,
 ):
+    import time
+
     print("Image fetcher thread native_id:", threading.get_native_id())
 
     try:
@@ -214,7 +216,12 @@ def image_fetcher_thread(
 
             with controller.lock:
                 if path in controller.excluded_paths:
-                    continue
+                    excluded = True
+                else:
+                    excluded = False
+            if excluded:
+                time.sleep(0.3)
+                continue
 
             with not_full:
                 while len(dq) >= max_size:
@@ -224,6 +231,7 @@ def image_fetcher_thread(
                 slide = load_slide(path)
             except Exception as e:
                 print(f"Failed to load {path}: {e}")
+                time.sleep(0.5)
                 continue
 
             with not_full:
