@@ -428,6 +428,7 @@ class TestDrawLoadHistoryOverlay:
     DARK_GRAY = (60, 60, 60)
     GREEN = (60, 200, 60)
     BLUE = (70, 140, 220)
+    MAGENTA = (220, 60, 220)
     RED = (220, 60, 60)
 
     def setup_method(self):
@@ -451,15 +452,16 @@ class TestDrawLoadHistoryOverlay:
         for x, y in [(15, 170), (100, 170), (185, 170)]:
             assert self.screen.get_at((x, y))[:3] == self.DARK_GRAY
 
-    def test_single_success_draws_full_height_green_and_blue_bars(self):
-        """Test that a lone successful entry (which is its own max) fills
-        the bar to full height, in the rightmost (newest) slot"""
+    def test_single_success_draws_full_height_bars_for_all_three_metrics(self):
+        """Test that a lone successful entry (which is its own max for every
+        metric) fills all three bars to full height, in the newest slot"""
         history = [{"success": True, "bytes": 1000, "seconds": 0.5}]
 
         draw_load_history_overlay(self.screen, self.status_box_rect, history)
 
         assert self.screen.get_at((182, 158))[:3] == self.GREEN
-        assert self.screen.get_at((186, 158))[:3] == self.BLUE
+        assert self.screen.get_at((185, 158))[:3] == self.BLUE
+        assert self.screen.get_at((188, 158))[:3] == self.MAGENTA
 
     def test_failure_draws_full_height_red_bar(self):
         """Test that a failed load draws a single red bar spanning most of
@@ -483,8 +485,21 @@ class TestDrawLoadHistoryOverlay:
 
         # Near the top of the strip: only the full-height (newest) bar reaches
         # this high; the half-height (older) bar should not have colored it.
-        assert self.screen.get_at((186, 160))[:3] == self.BLUE
-        assert self.screen.get_at((177, 160))[:3] == self.DARK_GRAY
+        assert self.screen.get_at((185, 160))[:3] == self.BLUE
+        assert self.screen.get_at((176, 160))[:3] == self.DARK_GRAY
+
+    def test_speed_bar_scales_relative_to_the_window_max(self):
+        """Test that an entry with half the per-file speed of the window's
+        max produces a visibly shorter magenta bar"""
+        history = [
+            {"success": True, "bytes": 500, "seconds": 1.0},   # older: 500 B/s, half the speed
+            {"success": True, "bytes": 1000, "seconds": 1.0},  # newest: 1000 B/s, the max
+        ]
+
+        draw_load_history_overlay(self.screen, self.status_box_rect, history)
+
+        assert self.screen.get_at((188, 160))[:3] == self.MAGENTA
+        assert self.screen.get_at((179, 160))[:3] == self.DARK_GRAY
 
     def test_partial_history_right_aligns_leaving_left_slots_empty(self):
         """Test that with fewer than 20 entries, unused slots on the left

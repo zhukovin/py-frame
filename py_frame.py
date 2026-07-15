@@ -433,15 +433,17 @@ def draw_load_history_overlay(screen: pygame.Surface,
     """
     Draw a dark-gray histogram strip to the left of the status box, spanning
     the rest of the available width. Each of the last 20 load attempts gets
-    a slot: a green bar (load time) and blue bar (size) side by side, each
-    scaled relative to the max of its own metric across the current window,
-    or a single full-height red bar if that attempt failed. Newest is on the
-    right, oldest on the left; slots are right-aligned so the strip fills in
-    from the right before the window has 20 entries.
+    a slot: a green bar (load time), blue bar (size), and magenta bar (that
+    file's own load speed) side by side, each scaled relative to the max of
+    its own metric across the current window, or a single full-height red
+    bar if that attempt failed. Newest is on the right, oldest on the left;
+    slots are right-aligned so the strip fills in from the right before the
+    window has 20 entries.
     """
     DARK_GRAY = (60, 60, 60)
     GREEN = (60, 200, 60)
     BLUE = (70, 140, 220)
+    MAGENTA = (220, 60, 220)
     RED = (220, 60, 60)
 
     margin = 10
@@ -466,6 +468,10 @@ def draw_load_history_overlay(screen: pygame.Surface,
     successful = [h for h in load_history if h["success"]]
     max_seconds = max((h["seconds"] for h in successful), default=0)
     max_bytes = max((h["bytes"] for h in successful), default=0)
+    max_speed = max(
+        (h["bytes"] / h["seconds"] for h in successful if h["seconds"] > 0),
+        default=0,
+    )
 
     empty_slots = num_slots - len(load_history)
 
@@ -475,9 +481,9 @@ def draw_load_history_overlay(screen: pygame.Surface,
 
         if not entry["success"]:
             bar_rect = pygame.Rect(
-                int(slot_x + slot_w * 0.1),
+                int(slot_x + slot_w * 0.05),
                 rect.y + top_padding,
-                int(slot_w * 0.8),
+                int(slot_w * 0.9),
                 int(max_bar_height),
             )
             pygame.draw.rect(screen, RED, bar_rect)
@@ -485,21 +491,31 @@ def draw_load_history_overlay(screen: pygame.Surface,
 
         time_height = int(max_bar_height * (entry["seconds"] / max_seconds)) if max_seconds > 0 else 0
         green_rect = pygame.Rect(
-            int(slot_x + slot_w * 0.1),
+            int(slot_x + slot_w * 0.05),
             rect.bottom - time_height,
-            int(slot_w * 0.35),
+            int(slot_w * 0.28),
             time_height,
         )
         pygame.draw.rect(screen, GREEN, green_rect)
 
         size_height = int(max_bar_height * (entry["bytes"] / max_bytes)) if max_bytes > 0 else 0
         blue_rect = pygame.Rect(
-            int(slot_x + slot_w * 0.5),
+            int(slot_x + slot_w * 0.36),
             rect.bottom - size_height,
-            int(slot_w * 0.35),
+            int(slot_w * 0.28),
             size_height,
         )
         pygame.draw.rect(screen, BLUE, blue_rect)
+
+        entry_speed = entry["bytes"] / entry["seconds"] if entry["seconds"] > 0 else 0
+        speed_height = int(max_bar_height * (entry_speed / max_speed)) if max_speed > 0 else 0
+        magenta_rect = pygame.Rect(
+            int(slot_x + slot_w * 0.67),
+            rect.bottom - speed_height,
+            int(slot_w * 0.28),
+            speed_height,
+        )
+        pygame.draw.rect(screen, MAGENTA, magenta_rect)
 
 
 def build_blurred_background(screen_size, slide_rects):
