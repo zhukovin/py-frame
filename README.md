@@ -64,17 +64,24 @@ For development and testing, also install:
 pip3 install pytest pytest-cov coverage
 ``` 
 
-## Create target folder on RPi
+## Get the code on RPi
+
+Clone the repo directly into the target folder:
 ```
-mkdir ~/py-frame
+git clone https://github.com/zhukovin/py-frame.git ~/py-frame
 cd ~/py-frame
 ```
 
-Get the executable code:
+No SSH keys or GitHub auth needed — the repo is public and the RPi only ever pulls, never pushes.
+
+### Updating the code later
 ```
-curl -L raw.githubusercontent.com/zhukovin/py-frame/main/py_frame.py -o py_frame.py
-curl -L raw.githubusercontent.com/zhukovin/py-frame/main/web_server.py -o web_server.py
+cd ~/py-frame
+git pull
+sudo systemctl restart py-frame.service
 ```
+`git pull` always fetches the exact latest commit (unlike curling the raw files, which can
+briefly serve a stale cached copy right after a push), and updates every file in one step.
 
 ## Mount NAS photo folder using NFS
 
