@@ -697,7 +697,7 @@ def render_loop(
 
     pygame.mouse.set_visible(False)
     font = pygame.font.SysFont(None, 40)
-    status_font = pygame.font.SysFont(None, 24)
+    status_font = pygame.font.SysFont(None, 72)
 
     current_slides: list[Slide] = []
     current_pattern_type: Optional[int] = None
