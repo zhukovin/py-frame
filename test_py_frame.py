@@ -26,6 +26,7 @@ from py_frame import (
     compute_pattern_rects,
     load_exclusions,
     finalize_exclusions,
+    reclassify_pattern_type,
     downscale_slide_to_screen,
     downscale_slides_to_screen,
     read_file_list,
@@ -369,6 +370,48 @@ class TestLoadExclusions:
         assert lines == ["old.jpg", "new.jpg"]
 
 
+class TestReclassifyPatternType:
+    """Test suite for reclassify_pattern_type function"""
+
+    def _slides(self, orientations):
+        return [Slide(path=f"{o}{i}.jpg", surface=None, orientation=o) for i, o in enumerate(orientations)]
+
+    def test_empty_slides_drops_entry(self):
+        assert reclassify_pattern_type([], 2) is None
+
+    def test_type0_keeps_type_when_nonempty(self):
+        slides = self._slides("L")
+        assert reclassify_pattern_type(slides, 0) == 0
+
+    def test_type1_keeps_type_as_p_count_shrinks(self):
+        slides = self._slides("PP")
+        assert reclassify_pattern_type(slides, 1) == 1
+
+    def test_type2_downgrades_to_type3_when_one_p_removed(self):
+        # started as PPLLL (2P, 3L); one P got excluded -> 1P, 3L fits PLLL
+        slides = self._slides("PLLL")
+        assert reclassify_pattern_type(slides, 2) == 3
+
+    def test_type2_dropped_when_l_count_falls_below_3(self):
+        # PPLLL lost one L -> 2P, 2L doesn't fit any pattern
+        slides = self._slides("PPLL")
+        assert reclassify_pattern_type(slides, 2) is None
+
+    def test_type2_dropped_when_all_p_excluded(self):
+        # PPLLL lost both P's -> 3 L's alone don't fit any pattern
+        slides = self._slides("LLL")
+        assert reclassify_pattern_type(slides, 2) is None
+
+    def test_type3_dropped_when_sole_portrait_excluded(self):
+        # PLLL lost its only P -> 3 L's alone don't fit any pattern
+        slides = self._slides("LLL")
+        assert reclassify_pattern_type(slides, 3) is None
+
+    def test_type3_downgrades_to_single_slide_when_only_one_remains(self):
+        slides = self._slides("L")
+        assert reclassify_pattern_type(slides, 3) == 0
+
+
 class TestFinalizeExclusions:
     """Test suite for finalize_exclusions function"""
     
@@ -427,6 +470,46 @@ class TestFinalizeExclusions:
         assert len(self.controller.history) == 1
         assert len(self.controller.history[0][0]) == 1
         assert self.controller.history[0][0][0].path == "test2.jpg"
+
+    def test_finalize_reclassifies_broken_pattern_in_history(self):
+        """Marking a P slide on a PPLLL screen should downgrade a matching
+        history entry to PLLL instead of leaving a broken pattern_type=2 entry"""
+        p1 = Slide(path="p1.jpg", surface=pygame.Surface((10, 20)), orientation="P")
+        p2 = Slide(path="p2.jpg", surface=pygame.Surface((10, 20)), orientation="P")
+        l1 = Slide(path="l1.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+        l2 = Slide(path="l2.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+        l3 = Slide(path="l3.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+
+        self.controller.current_slides = [p1, p2, l1, l2, l3]
+        self.controller.current_marks = {0}  # mark p1
+        self.controller.history = [([p1, p2, l1, l2, l3], 2)]
+        self.controller.history_index = 0
+
+        finalize_exclusions(self.controller)
+
+        assert len(self.controller.history) == 1
+        remaining_slides, ptype = self.controller.history[0]
+        assert ptype == 3
+        assert [s.path for s in remaining_slides] == ["p2.jpg", "l1.jpg", "l2.jpg", "l3.jpg"]
+
+    def test_finalize_drops_history_entry_that_no_longer_fits_any_pattern(self):
+        """Excluding both portraits from a PPLLL screen leaves 3 L's, which
+        doesn't fit any known pattern, so the whole entry should be dropped"""
+        p1 = Slide(path="p1.jpg", surface=pygame.Surface((10, 20)), orientation="P")
+        p2 = Slide(path="p2.jpg", surface=pygame.Surface((10, 20)), orientation="P")
+        l1 = Slide(path="l1.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+        l2 = Slide(path="l2.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+        l3 = Slide(path="l3.jpg", surface=pygame.Surface((20, 10)), orientation="L")
+
+        self.controller.current_slides = [p1, p2, l1, l2, l3]
+        self.controller.current_marks = {0, 1}  # mark both P's
+        self.controller.history = [([p1, p2, l1, l2, l3], 2)]
+        self.controller.history_index = 0
+
+        finalize_exclusions(self.controller)
+
+        assert self.controller.history == []
+        assert self.controller.history_index == -1
 
 
 class TestDownscaleSlideToScreen:

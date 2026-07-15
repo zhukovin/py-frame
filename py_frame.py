@@ -454,6 +454,39 @@ def load_exclusions(controller: SlideshowController):
                 controller.excluded_paths.add(path)
 
 
+def reclassify_pattern_type(slides: List[Slide], original_ptype: int) -> Optional[int]:
+    """
+    Decide how a history entry should be classified after some of its slides
+    were removed due to exclusion.
+
+    Patterns 0 (solo slide) and 1 (PPP) degrade gracefully as slides are
+    removed, so they keep their original type. Patterns 2 (PPLLL) and 3
+    (PLLL) depend on specific P/L proportions to avoid blank gaps in
+    compute_pattern_rects, so they are re-derived from what's left, using the
+    same thresholds as extract_pattern_from_deque. Returns None if nothing
+    valid remains and the entry should be dropped.
+    """
+    if not slides:
+        return None
+
+    if original_ptype in (0, 1):
+        return original_ptype
+
+    count_p = sum(1 for s in slides if s.orientation == "P")
+    count_l = sum(1 for s in slides if s.orientation == "L")
+
+    if count_p >= 3:
+        return 1
+    elif count_p >= 2 and count_l >= 3:
+        return 2
+    elif count_p >= 1 and count_l >= 3:
+        return 3
+    elif len(slides) == 1:
+        return 0
+    else:
+        return None
+
+
 def finalize_exclusions(controller: SlideshowController):
     """
     Take currently marked slots from the *current* screen,
@@ -485,15 +518,16 @@ def finalize_exclusions(controller: SlideshowController):
                     controller.excluded_paths.add(path)
                     new_paths.append(path)
 
-        # 2) Clean up history: remove any slides whose path is now excluded.
-        #    Drop history entries that become empty.
+        # 2) Clean up history: remove any slides whose path is now excluded,
+        #    and reclassify (or drop) entries that no longer fit their
+        #    pattern's required P/L composition.
         if controller.history:
             new_history: list[tuple[list[Slide], int]] = []
             for slides, ptype in controller.history:
                 filtered = [s for s in slides if s.path not in controller.excluded_paths]
-                if filtered:
-                    # keep this history entry, but without excluded slides
-                    new_history.append((filtered, ptype))
+                new_ptype = reclassify_pattern_type(filtered, ptype)
+                if new_ptype is not None:
+                    new_history.append((filtered, new_ptype))
 
             controller.history = new_history
 
