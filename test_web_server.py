@@ -6,7 +6,7 @@ import pytest
 import pygame
 from unittest.mock import Mock, MagicMock
 from flask import Flask
-from web_server import create_app
+from web_server import create_app, _parse_int_field
 from py_frame import SlideshowController, Slide
 
 
@@ -262,6 +262,34 @@ class TestWebServer:
         assert 'refreshState' in html
         assert 'toggleMark' in html
         assert 'sendCommand' in html
+
+
+class TestParseIntField:
+    """Test suite for _parse_int_field, the helper shared by
+    api_mark and api_command for parsing user-supplied integer fields"""
+
+    def setup_method(self):
+        self.controller = SlideshowController()
+        self.app = create_app(self.controller)
+
+    def test_valid_int_parses(self):
+        with self.app.app_context():
+            value, error = _parse_int_field({"slot": 3}, "slot", -1)
+        assert value == 3
+        assert error is None
+
+    def test_missing_key_uses_default(self):
+        with self.app.app_context():
+            value, error = _parse_int_field({}, "slot", -1)
+        assert value == -1
+        assert error is None
+
+    def test_non_numeric_returns_400_error(self):
+        with self.app.app_context():
+            value, error = _parse_int_field({"slot": "abc"}, "slot", -1)
+        assert value is None
+        response, status = error
+        assert status == 400
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from PIL import Image
 from py_frame import (
     Slide,
     SlideshowController,
+    classify_pattern_type,
     extract_pattern_from_deque,
     make_old_paper_surface,
     load_slide,
@@ -444,6 +445,19 @@ class TestDrawStatusOverlay:
         assert box_rect.right == 400 - 10  # 10px margin from the right edge
         assert box_rect.bottom == 300 - 10  # 10px margin from the bottom edge
 
+    def test_box_width_is_stable_across_drive_status_transitions(self):
+        """Test that the box (and therefore the histogram to its left) does
+        not change width when the drive status text changes -- otherwise the
+        histogram would shrink exactly when a disconnect makes "Drive:
+        DISCONNECTED" wider than "Drive: OK", i.e. when it's needed most"""
+        screen = pygame.Surface((800, 300))
+
+        ok_rect = draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_bytes_per_sec=1000.0)
+        disconnected_rect = draw_status_overlay(screen, self.font, paused=False, drive_ok=False, download_bytes_per_sec=None)
+
+        assert ok_rect.width == disconnected_rect.width
+        assert ok_rect.x == disconnected_rect.x
+
 
 class TestDrawLoadHistoryOverlay:
     """Test suite for draw_load_history_overlay function"""
@@ -536,12 +550,25 @@ class TestDrawLoadHistoryOverlay:
 
     def test_no_space_left_of_status_box_does_not_crash(self):
         """Test that a status box covering nearly the whole width degrades
-        gracefully (no space left to draw) instead of raising"""
+        gracefully (no space left to draw) instead of raising, and reports
+        that via a None return rather than a rect"""
         status_box_rect = pygame.Rect(5, 150, 290, 50)
 
-        draw_load_history_overlay(self.screen, status_box_rect, [
+        result = draw_load_history_overlay(self.screen, status_box_rect, [
             {"success": True, "bytes": 1000, "seconds": 0.5}
         ])
+
+        assert result is None
+
+    def test_returns_its_rect_when_drawn(self):
+        """Test that the histogram's rect is returned on success, so the
+        render loop can restrict a partial-update region to it"""
+        result = draw_load_history_overlay(self.screen, self.status_box_rect, [
+            {"success": True, "bytes": 1000, "seconds": 0.5}
+        ])
+
+        assert isinstance(result, pygame.Rect)
+        assert result.width == self.status_box_rect.x - 10 - 10  # gap + margin
 
 
 class TestComputePatternRects:
@@ -663,6 +690,30 @@ class TestLoadExclusions:
         with open(self.controller.exclusions_file) as f:
             lines = [l.strip() for l in f if l.strip()]
         assert lines == ["old.jpg", "new.jpg"]
+
+
+class TestClassifyPatternType:
+    """Test suite for classify_pattern_type, the shared P/L threshold
+    classifier used by both extract_pattern_from_deque and
+    reclassify_pattern_type (kept in one place so the two can't drift)"""
+
+    def test_ppp(self):
+        assert classify_pattern_type(count_p=3, count_l=0) == (1, 3, 0)
+
+    def test_pplll(self):
+        assert classify_pattern_type(count_p=2, count_l=3) == (2, 2, 3)
+
+    def test_plll(self):
+        assert classify_pattern_type(count_p=1, count_l=3) == (3, 1, 3)
+
+    def test_more_than_needed_still_matches_highest_priority_pattern(self):
+        # 5 P's and 0 L's still satisfies PPP (only needs 3 P's)
+        assert classify_pattern_type(count_p=5, count_l=0) == (1, 3, 0)
+
+    def test_no_match_returns_none(self):
+        assert classify_pattern_type(count_p=0, count_l=5) is None
+        assert classify_pattern_type(count_p=1, count_l=2) is None
+        assert classify_pattern_type(count_p=0, count_l=0) is None
 
 
 class TestReclassifyPatternType:

@@ -166,6 +166,28 @@ def load_slide(path: str) -> Slide:
 # Pattern extraction (up to 5 entries)
 # ============================================================
 
+def classify_pattern_type(count_p: int, count_l: int) -> Optional[Tuple[int, int, int]]:
+    """
+    Given counts of Portrait/Landscape slides, decide which pattern type (if
+    any) they satisfy and how many of each orientation that pattern needs:
+        Type 1: PPP      (needs 3 Portrait, 0 Landscape)
+        Type 2: PPLLL    (needs 2 Portrait, 3 Landscape)
+        Type 3: PLLL     (needs 1 Portrait, 3 Landscape)
+    Returns None if no valid pattern fits. Shared by extract_pattern_from_deque
+    (fresh extraction from the incoming deque) and reclassify_pattern_type
+    (re-deriving a history entry's type after exclusion) so the thresholds
+    can't silently drift between the two.
+    """
+    if count_p >= 3:
+        return 1, 3, 0
+    elif count_p >= 2 and count_l >= 3:
+        return 2, 2, 3
+    elif count_p >= 1 and count_l >= 3:
+        return 3, 1, 3
+    else:
+        return None
+
+
 def extract_pattern_from_deque(dq: deque[Slide]) -> Tuple[List[Slide], int]:
     """
     Examine up to the first 5 elements of dq.
@@ -187,17 +209,10 @@ def extract_pattern_from_deque(dq: deque[Slide]) -> Tuple[List[Slide], int]:
     count_l = sum(1 for s in window if s.orientation == "L")
 
     # Determine pattern type & needed counts
-    if count_p >= 3:
-        needP, needL = 3, 0
-        pattern_type = 1
-    elif count_p >= 2 and count_l >= 3:
-        needP, needL = 2, 3
-        pattern_type = 2
-    elif count_p >= 1 and count_l >= 3:
-        needP, needL = 1, 3
-        pattern_type = 3
-    else:
+    classification = classify_pattern_type(count_p, count_l)
+    if classification is None:
         raise ValueError("No valid PPP / PPLLL / PLLL pattern in first 5 entries.")
+    pattern_type, needP, needL = classification
 
     # Select slides that satisfy the pattern, in order
     extracted: List[Slide] = []
@@ -234,6 +249,30 @@ def extract_pattern_from_deque(dq: deque[Slide]) -> Tuple[List[Slide], int]:
 # ============================================================
 # Image fetcher thread
 # ============================================================
+
+def _record_load_attempt(controller: SlideshowController,
+                         success: bool,
+                         load_bytes: int = 0,
+                         load_seconds: float = 0.0,
+                         update_drive_status: bool = True,
+                         bytes_per_sec: Optional[float] = None):
+    """
+    Record the outcome of one photo load attempt for the diagnostics
+    overlay/histogram, under a single lock acquisition. Pass
+    update_drive_status=False for a failure that reflects a bad file rather
+    than a drive/connectivity problem (e.g. a corrupt image), so drive_ok
+    and the speed estimate are left untouched.
+    """
+    with controller.lock:
+        if update_drive_status:
+            controller.drive_ok = success
+            controller.download_bytes_per_sec = bytes_per_sec
+        controller.load_history.append({
+            "success": success,
+            "bytes": load_bytes,
+            "seconds": load_seconds,
+        })
+
 
 def image_fetcher_thread(
         file_paths: list[str],
@@ -285,17 +324,13 @@ def image_fetcher_thread(
                 # attempt for the histogram, but don't flag the drive down
                 # or discard the legitimate rolling speed average.
                 print(f"Skipping unreadable image {path}: {e}")
-                with controller.lock:
-                    controller.load_history.append({"success": False, "bytes": 0, "seconds": 0.0})
+                _record_load_attempt(controller, success=False, update_drive_status=False)
                 time.sleep(0.5)
                 continue
             except Exception as e:
                 print(f"Failed to load {path}: {e}")
                 recent_load_stats.clear()
-                with controller.lock:
-                    controller.drive_ok = False
-                    controller.download_bytes_per_sec = None
-                    controller.load_history.append({"success": False, "bytes": 0, "seconds": 0.0})
+                _record_load_attempt(controller, success=False)
                 time.sleep(0.5)
                 continue
 
@@ -304,14 +339,13 @@ def image_fetcher_thread(
             total_seconds = sum(s for _, s in recent_load_stats)
             bytes_per_sec = total_bytes / total_seconds if total_seconds > 0 else None
 
-            with controller.lock:
-                controller.drive_ok = True
-                controller.download_bytes_per_sec = bytes_per_sec
-                controller.load_history.append({
-                    "success": True,
-                    "bytes": slide.load_bytes,
-                    "seconds": slide.load_seconds,
-                })
+            _record_load_attempt(
+                controller,
+                success=True,
+                load_bytes=slide.load_bytes,
+                load_seconds=slide.load_seconds,
+                bytes_per_sec=bytes_per_sec,
+            )
 
             with not_full:
                 dq.append(slide)
@@ -432,7 +466,15 @@ def draw_status_overlay(screen: pygame.Surface,
     line_spacing = 2
     text_surfaces = [font.render(line, True, BLACK) for line in lines]
 
-    box_w = max(s.get_width() for s in text_surfaces) + 2 * padding
+    # Size using the worst-case width of the fixed-vocabulary lines (not
+    # just whichever happens to be showing right now), so the box doesn't
+    # change size across Paused/Playing or Drive: OK/DISCONNECTED
+    # transitions -- otherwise the load-history histogram to its left
+    # would shrink exactly when the drive disconnects, i.e. when it's
+    # most needed for diagnosis.
+    fixed_vocabulary = ["Paused", "Playing", "Drive: OK", "Drive: DISCONNECTED"]
+    stable_widths = [font.size(text)[0] for text in fixed_vocabulary]
+    box_w = max(stable_widths + [s.get_width() for s in text_surfaces]) + 2 * padding
     box_h = sum(s.get_height() for s in text_surfaces) + 2 * padding + line_spacing * (len(lines) - 1)
 
     screen_w, screen_h = screen.get_size()
@@ -456,7 +498,7 @@ def draw_status_overlay(screen: pygame.Surface,
 
 def draw_load_history_overlay(screen: pygame.Surface,
                               status_box_rect: pygame.Rect,
-                              load_history: list):
+                              load_history: list) -> Optional[pygame.Rect]:
     """
     Draw a dark-gray histogram strip to the left of the status box, spanning
     the rest of the available width. Each of the last 20 load attempts gets
@@ -466,6 +508,9 @@ def draw_load_history_overlay(screen: pygame.Surface,
     bar if that attempt failed. Newest is on the right, oldest on the left;
     slots are right-aligned so the strip fills in from the right before the
     window has 20 entries.
+
+    Returns the strip's rect (so callers can restrict a partial-update
+    region to it), or None if there was no room to draw it.
     """
     DARK_GRAY = (60, 60, 60)
     GREEN = (60, 200, 60)
@@ -483,7 +528,7 @@ def draw_load_history_overlay(screen: pygame.Surface,
     )
 
     if rect.width <= 0:
-        return
+        return None
 
     pygame.draw.rect(screen, DARK_GRAY, rect)
 
@@ -499,6 +544,18 @@ def draw_load_history_overlay(screen: pygame.Surface,
         (h["bytes"] / h["seconds"] for h in successful if h["seconds"] > 0),
         default=0,
     )
+
+    BAR_WIDTH_FRAC = 0.28
+
+    def draw_scaled_bar(slot_x: float, color, x_frac: float, value: float, max_value: float):
+        height = int(max_bar_height * (value / max_value)) if max_value > 0 else 0
+        bar_rect = pygame.Rect(
+            int(slot_x + slot_w * x_frac),
+            rect.bottom - height,
+            int(slot_w * BAR_WIDTH_FRAC),
+            height,
+        )
+        pygame.draw.rect(screen, color, bar_rect)
 
     empty_slots = num_slots - len(load_history)
 
@@ -516,33 +573,15 @@ def draw_load_history_overlay(screen: pygame.Surface,
             pygame.draw.rect(screen, RED, bar_rect)
             continue
 
-        time_height = int(max_bar_height * (entry["seconds"] / max_seconds)) if max_seconds > 0 else 0
-        green_rect = pygame.Rect(
-            int(slot_x + slot_w * 0.05),
-            rect.bottom - time_height,
-            int(slot_w * 0.28),
-            time_height,
-        )
-        pygame.draw.rect(screen, GREEN, green_rect)
-
-        size_height = int(max_bar_height * (entry["bytes"] / max_bytes)) if max_bytes > 0 else 0
-        blue_rect = pygame.Rect(
-            int(slot_x + slot_w * 0.36),
-            rect.bottom - size_height,
-            int(slot_w * 0.28),
-            size_height,
-        )
-        pygame.draw.rect(screen, BLUE, blue_rect)
-
         entry_speed = entry["bytes"] / entry["seconds"] if entry["seconds"] > 0 else 0
-        speed_height = int(max_bar_height * (entry_speed / max_speed)) if max_speed > 0 else 0
-        magenta_rect = pygame.Rect(
-            int(slot_x + slot_w * 0.67),
-            rect.bottom - speed_height,
-            int(slot_w * 0.28),
-            speed_height,
-        )
-        pygame.draw.rect(screen, MAGENTA, magenta_rect)
+        for color, x_frac, value, max_value in (
+            (GREEN, 0.05, entry["seconds"], max_seconds),
+            (BLUE, 0.36, entry["bytes"], max_bytes),
+            (MAGENTA, 0.67, entry_speed, max_speed),
+        ):
+            draw_scaled_bar(slot_x, color, x_frac, value, max_value)
+
+    return rect
 
 
 def build_blurred_background(screen_size, slide_rects):
@@ -713,9 +752,10 @@ def reclassify_pattern_type(slides: List[Slide], original_ptype: int) -> Optiona
     Patterns 0 (solo slide) and 1 (PPP) degrade gracefully as slides are
     removed, so they keep their original type. Patterns 2 (PPLLL) and 3
     (PLLL) depend on specific P/L proportions to avoid blank gaps in
-    compute_pattern_rects, so they are re-derived from what's left, using the
-    same thresholds as extract_pattern_from_deque. Returns None if nothing
-    valid remains and the entry should be dropped.
+    compute_pattern_rects, so they are re-derived from what's left using
+    classify_pattern_type (the same thresholds extract_pattern_from_deque
+    uses). Returns None if nothing valid remains and the entry should be
+    dropped.
     """
     if not slides:
         return None
@@ -726,12 +766,9 @@ def reclassify_pattern_type(slides: List[Slide], original_ptype: int) -> Optiona
     count_p = sum(1 for s in slides if s.orientation == "P")
     count_l = sum(1 for s in slides if s.orientation == "L")
 
-    if count_p >= 3:
-        return 1
-    elif count_p >= 2 and count_l >= 3:
-        return 2
-    elif count_p >= 1 and count_l >= 3:
-        return 3
+    classification = classify_pattern_type(count_p, count_l)
+    if classification is not None:
+        return classification[0]
     elif len(slides) == 1:
         return 0
     else:
@@ -988,11 +1025,12 @@ def render_loop(
         if cmd and cmd.get("type") in ("screen_off", "screen_on"):
             need_to_render = True
 
-        # Refresh the status overlay periodically even if nothing else
-        # changed, so drive/speed issues show up promptly instead of
-        # waiting for the next slide change.
-        if now - last_status_render_time >= STATUS_REFRESH_SECONDS:
-            need_to_render = True
+        # Refresh just the diagnostics corner periodically even if nothing
+        # else changed, so drive/speed issues show up promptly instead of
+        # waiting for the next slide change. This is a much cheaper partial
+        # update than a full scene redraw (see need_to_render handling
+        # below), since only three lines of text and a histogram change.
+        need_status_refresh = (now - last_status_render_time) >= STATUS_REFRESH_SECONDS
 
         # --- Slide switching logic ---
         if need_advance:
@@ -1056,6 +1094,7 @@ def render_loop(
 
                 else:
                     # need a new pattern from deque
+                    need_more_images = False
                     with not_full:
                         if len(dq) == 0 and producer_done.is_set():
                             running = False
@@ -1073,8 +1112,15 @@ def render_loop(
                                 current_slides = slides
                                 current_pattern_type = ptype
                         else:
-                            # not enough images -> keep current screen
-                            continue
+                            # not enough images buffered yet
+                            need_more_images = True
+
+                    if need_more_images:
+                        # Back off briefly instead of busy-spinning the CPU
+                        # while waiting for the fetcher thread to refill the
+                        # buffer (lock already released above).
+                        time.sleep(0.2)
+                        continue
 
                     if current_slides and current_pattern_type is not None:
                         with controller.lock:
@@ -1149,6 +1195,17 @@ def render_loop(
             draw_load_history_overlay(screen, status_box_rect, load_history_snapshot)
 
             pygame.display.flip()
+            last_status_render_time = now
+
+        elif need_status_refresh:
+            # Nothing else changed: repaint just the diagnostics corner and
+            # push only that region, instead of re-rendering and flipping
+            # the whole scene purely to refresh three lines of text.
+            status_box_rect = draw_status_overlay(screen, status_font, paused, drive_ok, download_bytes_per_sec)
+            histogram_rect = draw_load_history_overlay(screen, status_box_rect, load_history_snapshot)
+
+            update_rect = status_box_rect.union(histogram_rect) if histogram_rect else status_box_rect
+            pygame.display.update(update_rect)
             last_status_render_time = now
 
         if need_advance:

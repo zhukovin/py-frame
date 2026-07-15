@@ -6,6 +6,18 @@ if TYPE_CHECKING:
     from py_frame import SlideshowController  # adjust import
 
 
+def _parse_int_field(data: dict, key: str, default: int):
+    """
+    Parse an integer field from a request's JSON body. Returns
+    (value, None) on success, or (None, error_response) on failure, where
+    error_response is a ready-to-return (jsonify(...), 400) tuple.
+    """
+    try:
+        return int(data.get(key, default)), None
+    except (TypeError, ValueError):
+        return None, (jsonify({"ok": False, "error": f"invalid {key}"}), 400)
+
+
 def create_app(controller: "SlideshowController") -> Flask:
     app = Flask(__name__)
 
@@ -28,10 +40,9 @@ def create_app(controller: "SlideshowController") -> Flask:
     @app.route("/api/mark", methods=["POST"])
     def api_mark():
         data = request.json or {}
-        try:
-            slot = int(data.get("slot", -1))
-        except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "invalid slot"}), 400
+        slot, error = _parse_int_field(data, "slot", -1)
+        if error:
+            return error
 
         with controller.lock:
             if not (0 <= slot < len(controller.current_slides)):
@@ -51,10 +62,9 @@ def create_app(controller: "SlideshowController") -> Flask:
         if cmd not in ("next", "prev", "pause", "play", "screen_off", "screen_on"):
             return jsonify({"ok": False, "error": "bad cmd"}), 400
 
-        try:
-            steps = int(data.get("steps", 1))
-        except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "invalid steps"}), 400
+        steps, error = _parse_int_field(data, "steps", 1)
+        if error:
+            return error
 
         with controller.lock:
             if cmd in ("pause", "play"):
