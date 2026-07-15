@@ -77,11 +77,14 @@ No SSH keys or GitHub auth needed — the repo is public and the RPi only ever p
 ### Updating the code later
 ```
 cd ~/py-frame
-git pull
+git pull --ff-only
 sudo systemctl restart py-frame.service
 ```
-`git pull` always fetches the exact latest commit (unlike curling the raw files, which can
-briefly serve a stale cached copy right after a push), and updates every file in one step.
+`git pull --ff-only` always fetches the exact latest commit (unlike curling the raw files,
+which can briefly serve a stale cached copy right after a push), and updates every file in one
+step. The `--ff-only` refuses to create a merge commit or silently rewrite history if the RPi's
+local copy has diverged (e.g. someone edited a file directly on the RPi) — it just fails loudly
+instead, so you notice and can decide how to reconcile it.
 
 ## Mount NAS photo folder using NFS
 
