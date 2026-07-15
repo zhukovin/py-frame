@@ -25,7 +25,6 @@ from py_frame import (
     blit_scaled,
     draw_slot_overlay,
     draw_status_overlay,
-    draw_load_history_overlay,
     format_speed,
     compute_pattern_rects,
     load_exclusions,
@@ -35,6 +34,7 @@ from py_frame import (
     downscale_slides_to_screen,
     read_file_list,
     image_fetcher_thread,
+    log_load_measurement,
     main,
     Orientation
 )
@@ -125,8 +125,7 @@ class TestSlideshowController:
         assert controller.black_screen is False
         assert controller.drive_ok is True
         assert controller.download_bytes_per_sec is None
-        assert list(controller.load_history) == []
-        assert controller.load_history.maxlen == 20
+        assert controller.measurements_file == "load_measurements.csv"
 
     def test_marks_management(self):
         """Test marking and unmarking slides"""
@@ -269,11 +268,17 @@ class TestLoadSlide:
         ImageDecodeError, not a bare exception, so callers can tell a bad
         file apart from a real drive/NFS problem"""
         bad_path = os.path.join(self.temp_dir, "corrupt.jpg")
+        content = b"this is not a real jpeg file"
         with open(bad_path, "wb") as f:
-            f.write(b"this is not a real jpeg file")
+            f.write(content)
 
-        with pytest.raises(ImageDecodeError):
+        with pytest.raises(ImageDecodeError) as exc_info:
             load_slide(bad_path)
+
+        # The raw read succeeded before decoding failed, so the exception
+        # should still carry that valid measurement for logging purposes.
+        assert exc_info.value.load_bytes == len(content)
+        assert exc_info.value.load_seconds >= 0
 
     def test_missing_file_raises_plain_oserror_not_image_decode_error(self):
         """A missing file fails at the read stage (before decoding is even
@@ -285,6 +290,63 @@ class TestLoadSlide:
         with pytest.raises(OSError) as exc_info:
             load_slide(missing_path)
         assert not isinstance(exc_info.value, ImageDecodeError)
+
+
+class TestLogLoadMeasurement:
+    """Test suite for log_load_measurement, which appends one CSV row per
+    photo load attempt for later offline analysis of size/time/speed
+    correlation"""
+
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.log_file = os.path.join(self.temp_dir, "measurements.csv")
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _read_rows(self):
+        import csv
+        with open(self.log_file, newline="") as f:
+            return list(csv.DictReader(f))
+
+    def test_writes_header_once_then_appends(self):
+        log_load_measurement(self.log_file, "a.jpg", "ok", load_bytes=1000, load_seconds=0.5)
+        log_load_measurement(self.log_file, "b.jpg", "ok", load_bytes=2000, load_seconds=1.0)
+
+        with open(self.log_file) as f:
+            lines = f.readlines()
+
+        assert lines[0].strip() == "timestamp,path,outcome,bytes,seconds,bytes_per_sec"
+        assert len(lines) == 3  # header + 2 rows
+
+    def test_ok_outcome_records_full_measurement(self):
+        log_load_measurement(self.log_file, "a.jpg", "ok", load_bytes=1000, load_seconds=0.5)
+
+        row = self._read_rows()[0]
+        assert row["path"] == "a.jpg"
+        assert row["outcome"] == "ok"
+        assert int(row["bytes"]) == 1000
+        assert float(row["seconds"]) == 0.5
+        assert float(row["bytes_per_sec"]) == 2000.0
+
+    def test_decode_error_still_records_the_valid_read_measurement(self):
+        log_load_measurement(self.log_file, "bad.jpg", "decode_error", load_bytes=500, load_seconds=0.25)
+
+        row = self._read_rows()[0]
+        assert row["outcome"] == "decode_error"
+        assert int(row["bytes"]) == 500
+        assert float(row["seconds"]) == 0.25
+        assert float(row["bytes_per_sec"]) == 2000.0
+
+    def test_io_error_leaves_measurement_fields_blank(self):
+        log_load_measurement(self.log_file, "missing.jpg", "io_error")
+
+        row = self._read_rows()[0]
+        assert row["outcome"] == "io_error"
+        assert row["bytes"] == ""
+        assert row["seconds"] == ""
+        assert row["bytes_per_sec"] == ""
 
 
 class TestSmoothscaleSafe:
@@ -457,118 +519,6 @@ class TestDrawStatusOverlay:
 
         assert ok_rect.width == disconnected_rect.width
         assert ok_rect.x == disconnected_rect.x
-
-
-class TestDrawLoadHistoryOverlay:
-    """Test suite for draw_load_history_overlay function"""
-
-    DARK_GRAY = (60, 60, 60)
-    GREEN = (60, 200, 60)
-    BLUE = (70, 140, 220)
-    MAGENTA = (220, 60, 220)
-    RED = (220, 60, 60)
-
-    def setup_method(self):
-        """Initialize pygame"""
-        pygame.init()
-        # screen (300, 200) + status_box_rect (200, 150, 90, 50) gives a
-        # histogram rect of (10, 150, 180, 50) -> slot width exactly 9.0,
-        # which keeps the expected pixel math clean and non-fragile.
-        self.screen = pygame.Surface((300, 200))
-        self.screen.fill((0, 0, 0))
-        self.status_box_rect = pygame.Rect(200, 150, 90, 50)
-
-    def teardown_method(self):
-        """Clean up pygame"""
-        pygame.quit()
-
-    def test_empty_history_draws_only_background(self):
-        """Test that an empty history draws the dark-gray strip with no bars"""
-        draw_load_history_overlay(self.screen, self.status_box_rect, [])
-
-        for x, y in [(15, 170), (100, 170), (185, 170)]:
-            assert self.screen.get_at((x, y))[:3] == self.DARK_GRAY
-
-    def test_single_success_draws_full_height_bars_for_all_three_metrics(self):
-        """Test that a lone successful entry (which is its own max for every
-        metric) fills all three bars to full height, in the newest slot"""
-        history = [{"success": True, "bytes": 1000, "seconds": 0.5}]
-
-        draw_load_history_overlay(self.screen, self.status_box_rect, history)
-
-        assert self.screen.get_at((182, 158))[:3] == self.GREEN
-        assert self.screen.get_at((185, 158))[:3] == self.BLUE
-        assert self.screen.get_at((188, 158))[:3] == self.MAGENTA
-
-    def test_failure_draws_full_height_red_bar(self):
-        """Test that a failed load draws a single red bar spanning most of
-        the slot, at full height (top to bottom of the strip)"""
-        history = [{"success": False, "bytes": 0, "seconds": 0.0}]
-
-        draw_load_history_overlay(self.screen, self.status_box_rect, history)
-
-        assert self.screen.get_at((184, 158))[:3] == self.RED
-        assert self.screen.get_at((184, 198))[:3] == self.RED
-
-    def test_bars_scale_relative_to_the_window_max(self):
-        """Test that an entry with half the bytes of the window's max
-        produces a visibly shorter blue bar"""
-        history = [
-            {"success": True, "bytes": 500, "seconds": 0.1},   # older, half the size
-            {"success": True, "bytes": 1000, "seconds": 0.1},  # newest, the max
-        ]
-
-        draw_load_history_overlay(self.screen, self.status_box_rect, history)
-
-        # Near the top of the strip: only the full-height (newest) bar reaches
-        # this high; the half-height (older) bar should not have colored it.
-        assert self.screen.get_at((185, 160))[:3] == self.BLUE
-        assert self.screen.get_at((176, 160))[:3] == self.DARK_GRAY
-
-    def test_speed_bar_scales_relative_to_the_window_max(self):
-        """Test that an entry with half the per-file speed of the window's
-        max produces a visibly shorter magenta bar"""
-        history = [
-            {"success": True, "bytes": 500, "seconds": 1.0},   # older: 500 B/s, half the speed
-            {"success": True, "bytes": 1000, "seconds": 1.0},  # newest: 1000 B/s, the max
-        ]
-
-        draw_load_history_overlay(self.screen, self.status_box_rect, history)
-
-        assert self.screen.get_at((188, 160))[:3] == self.MAGENTA
-        assert self.screen.get_at((179, 160))[:3] == self.DARK_GRAY
-
-    def test_partial_history_right_aligns_leaving_left_slots_empty(self):
-        """Test that with fewer than 20 entries, unused slots on the left
-        stay as plain background (newest is always on the right)"""
-        history = [{"success": True, "bytes": 1000, "seconds": 0.5}] * 3
-
-        draw_load_history_overlay(self.screen, self.status_box_rect, history)
-
-        # Leftmost slot (slot 0) should be untouched background
-        assert self.screen.get_at((12, 170))[:3] == self.DARK_GRAY
-
-    def test_no_space_left_of_status_box_does_not_crash(self):
-        """Test that a status box covering nearly the whole width degrades
-        gracefully (no space left to draw) instead of raising, and reports
-        that via a None return rather than a rect"""
-        status_box_rect = pygame.Rect(5, 150, 290, 50)
-
-        result = draw_load_history_overlay(self.screen, status_box_rect, [
-            {"success": True, "bytes": 1000, "seconds": 0.5}
-        ])
-
-        assert result is None
-
-    def test_returns_its_rect_when_drawn(self):
-        """Test that the histogram's rect is returned on success, so the
-        render loop can restrict a partial-update region to it"""
-        result = draw_load_history_overlay(self.screen, self.status_box_rect, [
-            {"success": True, "bytes": 1000, "seconds": 0.5}
-        ])
-
-        assert isinstance(result, pygame.Rect)
-        assert result.width == self.status_box_rect.x - 10 - 10  # gap + margin
 
 
 class TestComputePatternRects:
@@ -1087,8 +1037,18 @@ class TestImageFetcherThreadThrottling:
         pygame.init()
         pygame.display.set_mode((1, 1))
 
+        self.measurements_dir = tempfile.mkdtemp()
+        self.controller.measurements_file = os.path.join(self.measurements_dir, "measurements.csv")
+
     def teardown_method(self):
         pygame.quit()
+        import shutil
+        shutil.rmtree(self.measurements_dir, ignore_errors=True)
+
+    def _read_measurement_rows(self):
+        import csv
+        with open(self.controller.measurements_file, newline="") as f:
+            return list(csv.DictReader(f))
 
     def _run_with_bounded_sleep(self, file_paths, max_calls=3):
         """Run image_fetcher_thread with time.sleep mocked to raise after
@@ -1156,7 +1116,11 @@ class TestImageFetcherThreadThrottling:
 
         assert self.controller.drive_ok is False
         assert self.controller.download_bytes_per_sec is None
-        assert list(self.controller.load_history)[-1] == {"success": False, "bytes": 0, "seconds": 0.0}
+
+        rows = self._read_measurement_rows()
+        assert rows[-1]["outcome"] == "io_error"
+        assert rows[-1]["bytes"] == ""
+        assert rows[-1]["seconds"] == ""
 
     def test_corrupt_file_does_not_mark_drive_disconnected(self):
         """A bad/corrupt file (readable, but not a valid image) should NOT
@@ -1173,8 +1137,13 @@ class TestImageFetcherThreadThrottling:
 
             self._run_with_bounded_sleep([bad_path])
 
-            # Still recorded as a failed attempt for the histogram...
-            assert list(self.controller.load_history)[-1] == {"success": False, "bytes": 0, "seconds": 0.0}
+            # The read succeeded, so it's still logged as a valid
+            # size/time measurement (just flagged as a decode error)...
+            rows = self._read_measurement_rows()
+            assert rows[-1]["outcome"] == "decode_error"
+            assert int(rows[-1]["bytes"]) == len(b"not a real jpeg")
+            assert float(rows[-1]["seconds"]) >= 0
+
             # ...but the drive itself is not reported as disconnected, and
             # the existing speed estimate survives (unlike a real I/O failure).
             assert self.controller.drive_ok is True
@@ -1227,10 +1196,10 @@ class TestImageFetcherThreadThrottling:
             assert self.controller.download_bytes_per_sec is not None
             assert self.controller.download_bytes_per_sec >= 0
 
-            last_entry = list(self.controller.load_history)[-1]
-            assert last_entry["success"] is True
-            assert last_entry["bytes"] == os.path.getsize(img_path)
-            assert last_entry["seconds"] >= 0
+            rows = self._read_measurement_rows()
+            assert rows[-1]["outcome"] == "ok"
+            assert int(rows[-1]["bytes"]) == os.path.getsize(img_path)
+            assert float(rows[-1]["seconds"]) >= 0
         finally:
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)

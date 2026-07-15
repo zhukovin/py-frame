@@ -69,10 +69,9 @@ class SlideshowController:
         self.drive_ok: bool = True
         self.download_bytes_per_sec: Optional[float] = None
 
-        # Diagnostics: rolling history of the last 20 load attempts (success
-        # or failure) for the load-time / size histogram. Each entry is
-        # {"success": bool, "bytes": int, "seconds": float}.
-        self.load_history: deque = deque(maxlen=20)
+        # Every load attempt (success or failure) is appended as a CSV row
+        # here for later offline analysis of size/time/speed correlation.
+        self.measurements_file: str = "load_measurements.csv"
 
 
 def make_old_paper_surface(size):
@@ -101,8 +100,15 @@ class ImageDecodeError(Exception):
     distinct from I/O errors raised while reading the raw bytes, so callers
     can tell "one bad file" apart from "the drive/NFS mount is unreachable"
     instead of conflating both into the same failure signal.
+
+    Carries the read measurements (the raw read succeeded even though the
+    decode didn't), so callers logging load performance can still record a
+    valid size/time/speed data point for the read itself.
     """
-    pass
+    def __init__(self, message: str, load_bytes: int = 0, load_seconds: float = 0.0):
+        super().__init__(message)
+        self.load_bytes = load_bytes
+        self.load_seconds = load_seconds
 
 
 def load_slide(path: str) -> Slide:
@@ -151,7 +157,11 @@ def load_slide(path: str) -> Slide:
         else:  # "RGB"
             surface = pygame.image.fromstring(data, size, mode).convert()
     except Exception as e:
-        raise ImageDecodeError(f"failed to decode {path}: {e}") from e
+        raise ImageDecodeError(
+            f"failed to decode {path}: {e}",
+            load_bytes=load_bytes,
+            load_seconds=load_seconds,
+        ) from e
 
     return Slide(
         path=path,
@@ -252,26 +262,54 @@ def extract_pattern_from_deque(dq: deque[Slide]) -> Tuple[List[Slide], int]:
 
 def _record_load_attempt(controller: SlideshowController,
                          success: bool,
-                         load_bytes: int = 0,
-                         load_seconds: float = 0.0,
-                         update_drive_status: bool = True,
-                         bytes_per_sec: Optional[float] = None):
+                         bytes_per_sec: Optional[float] = None,
+                         update_drive_status: bool = True):
     """
-    Record the outcome of one photo load attempt for the diagnostics
-    overlay/histogram, under a single lock acquisition. Pass
-    update_drive_status=False for a failure that reflects a bad file rather
-    than a drive/connectivity problem (e.g. a corrupt image), so drive_ok
-    and the speed estimate are left untouched.
+    Record the outcome of one photo load attempt for the status overlay.
+    Pass update_drive_status=False for a failure that reflects a bad file
+    rather than a drive/connectivity problem (e.g. a corrupt image), so
+    drive_ok and the speed estimate are left untouched.
     """
+    if not update_drive_status:
+        return
     with controller.lock:
-        if update_drive_status:
-            controller.drive_ok = success
-            controller.download_bytes_per_sec = bytes_per_sec
-        controller.load_history.append({
-            "success": success,
-            "bytes": load_bytes,
-            "seconds": load_seconds,
-        })
+        controller.drive_ok = success
+        controller.download_bytes_per_sec = bytes_per_sec
+
+
+def log_load_measurement(log_file: str, path: str, outcome: str, load_bytes: int = 0, load_seconds: float = 0.0):
+    """
+    Append one load-attempt measurement to a CSV file for later offline
+    analysis of size/time/speed correlation (e.g. "why is loading time or
+    transfer speed inconsistent"). One row per attempt, regardless of
+    outcome:
+        outcome="ok"           - full success; bytes/seconds/speed are valid
+        outcome="decode_error" - the raw read succeeded (bytes/seconds are
+                                  still valid) but the image itself was
+                                  corrupt/unsupported
+        outcome="io_error"     - the read itself failed (missing file,
+                                  disconnected mount, etc); no measurement
+                                  was possible, so bytes/seconds are blank
+    """
+    import csv
+    from datetime import datetime
+
+    has_measurement = outcome in ("ok", "decode_error")
+    bytes_per_sec = load_bytes / load_seconds if has_measurement and load_seconds > 0 else ""
+
+    file_exists = os.path.exists(log_file)
+    with open(log_file, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["timestamp", "path", "outcome", "bytes", "seconds", "bytes_per_sec"])
+        writer.writerow([
+            datetime.now().isoformat(timespec="seconds"),
+            path,
+            outcome,
+            load_bytes if has_measurement else "",
+            f"{load_seconds:.4f}" if has_measurement else "",
+            f"{bytes_per_sec:.2f}" if bytes_per_sec != "" else "",
+        ])
 
 
 def image_fetcher_thread(
@@ -320,17 +358,23 @@ def image_fetcher_thread(
             try:
                 slide = load_slide(path)
             except ImageDecodeError as e:
-                # A bad/corrupt file, not a drive problem: record the failed
-                # attempt for the histogram, but don't flag the drive down
-                # or discard the legitimate rolling speed average.
+                # A bad/corrupt file, not a drive problem: don't flag the
+                # drive down or discard the legitimate rolling speed
+                # average, but the read itself succeeded so still log its
+                # size/time as a valid measurement.
                 print(f"Skipping unreadable image {path}: {e}")
                 _record_load_attempt(controller, success=False, update_drive_status=False)
+                log_load_measurement(
+                    controller.measurements_file, path, "decode_error",
+                    load_bytes=e.load_bytes, load_seconds=e.load_seconds,
+                )
                 time.sleep(0.5)
                 continue
             except Exception as e:
                 print(f"Failed to load {path}: {e}")
                 recent_load_stats.clear()
                 _record_load_attempt(controller, success=False)
+                log_load_measurement(controller.measurements_file, path, "io_error")
                 time.sleep(0.5)
                 continue
 
@@ -339,12 +383,10 @@ def image_fetcher_thread(
             total_seconds = sum(s for _, s in recent_load_stats)
             bytes_per_sec = total_bytes / total_seconds if total_seconds > 0 else None
 
-            _record_load_attempt(
-                controller,
-                success=True,
-                load_bytes=slide.load_bytes,
-                load_seconds=slide.load_seconds,
-                bytes_per_sec=bytes_per_sec,
+            _record_load_attempt(controller, success=True, bytes_per_sec=bytes_per_sec)
+            log_load_measurement(
+                controller.measurements_file, path, "ok",
+                load_bytes=slide.load_bytes, load_seconds=slide.load_seconds,
             )
 
             with not_full:
@@ -450,8 +492,8 @@ def draw_status_overlay(screen: pygame.Surface,
     everything, including black-screen mode) so stalls can be diagnosed
     without waiting for the next slide change.
 
-    Returns the box's rect so callers (e.g. the load-history histogram) can
-    lay out other diagnostics relative to it.
+    Returns the box's rect so callers can restrict a partial-screen update
+    to just this region when nothing else on screen changed.
     """
     LIGHT_GRAY = (211, 211, 211)
     BLACK = (0, 0, 0)
@@ -468,10 +510,8 @@ def draw_status_overlay(screen: pygame.Surface,
 
     # Size using the worst-case width of the fixed-vocabulary lines (not
     # just whichever happens to be showing right now), so the box doesn't
-    # change size across Paused/Playing or Drive: OK/DISCONNECTED
-    # transitions -- otherwise the load-history histogram to its left
-    # would shrink exactly when the drive disconnects, i.e. when it's
-    # most needed for diagnosis.
+    # jump around on screen across Paused/Playing or Drive: OK/DISCONNECTED
+    # transitions.
     fixed_vocabulary = ["Paused", "Playing", "Drive: OK", "Drive: DISCONNECTED"]
     stable_widths = [font.size(text)[0] for text in fixed_vocabulary]
     box_w = max(stable_widths + [s.get_width() for s in text_surfaces]) + 2 * padding
@@ -494,94 +534,6 @@ def draw_status_overlay(screen: pygame.Surface,
         y += surf.get_height() + line_spacing
 
     return box_rect
-
-
-def draw_load_history_overlay(screen: pygame.Surface,
-                              status_box_rect: pygame.Rect,
-                              load_history: list) -> Optional[pygame.Rect]:
-    """
-    Draw a dark-gray histogram strip to the left of the status box, spanning
-    the rest of the available width. Each of the last 20 load attempts gets
-    a slot: a green bar (load time), blue bar (size), and magenta bar (that
-    file's own load speed) side by side, each scaled relative to the max of
-    its own metric across the current window, or a single full-height red
-    bar if that attempt failed. Newest is on the right, oldest on the left;
-    slots are right-aligned so the strip fills in from the right before the
-    window has 20 entries.
-
-    Returns the strip's rect (so callers can restrict a partial-update
-    region to it), or None if there was no room to draw it.
-    """
-    DARK_GRAY = (60, 60, 60)
-    GREEN = (60, 200, 60)
-    BLUE = (70, 140, 220)
-    MAGENTA = (220, 60, 220)
-    RED = (220, 60, 60)
-
-    margin = 10
-    gap = 10
-    rect = pygame.Rect(
-        margin,
-        status_box_rect.y,
-        status_box_rect.x - gap - margin,
-        status_box_rect.height,
-    )
-
-    if rect.width <= 0:
-        return None
-
-    pygame.draw.rect(screen, DARK_GRAY, rect)
-
-    num_slots = 20
-    slot_w = rect.width / num_slots
-    top_padding = 6
-    max_bar_height = rect.height - top_padding
-
-    successful = [h for h in load_history if h["success"]]
-    max_seconds = max((h["seconds"] for h in successful), default=0)
-    max_bytes = max((h["bytes"] for h in successful), default=0)
-    max_speed = max(
-        (h["bytes"] / h["seconds"] for h in successful if h["seconds"] > 0),
-        default=0,
-    )
-
-    BAR_WIDTH_FRAC = 0.28
-
-    def draw_scaled_bar(slot_x: float, color, x_frac: float, value: float, max_value: float):
-        height = int(max_bar_height * (value / max_value)) if max_value > 0 else 0
-        bar_rect = pygame.Rect(
-            int(slot_x + slot_w * x_frac),
-            rect.bottom - height,
-            int(slot_w * BAR_WIDTH_FRAC),
-            height,
-        )
-        pygame.draw.rect(screen, color, bar_rect)
-
-    empty_slots = num_slots - len(load_history)
-
-    for i, entry in enumerate(load_history):
-        slot_index = empty_slots + i
-        slot_x = rect.x + slot_index * slot_w
-
-        if not entry["success"]:
-            bar_rect = pygame.Rect(
-                int(slot_x + slot_w * 0.05),
-                rect.y + top_padding,
-                int(slot_w * 0.9),
-                int(max_bar_height),
-            )
-            pygame.draw.rect(screen, RED, bar_rect)
-            continue
-
-        entry_speed = entry["bytes"] / entry["seconds"] if entry["seconds"] > 0 else 0
-        for color, x_frac, value, max_value in (
-            (GREEN, 0.05, entry["seconds"], max_seconds),
-            (BLUE, 0.36, entry["bytes"], max_bytes),
-            (MAGENTA, 0.67, entry_speed, max_speed),
-        ):
-            draw_scaled_bar(slot_x, color, x_frac, value, max_value)
-
-    return rect
 
 
 def build_blurred_background(screen_size, slide_rects):
@@ -958,7 +910,6 @@ def render_loop(
             current_marks_snapshot = set(controller.current_marks)
             drive_ok = controller.drive_ok
             download_bytes_per_sec = controller.download_bytes_per_sec
-            load_history_snapshot = list(controller.load_history)
 
         # Detect mark changes (compare snapshots)
         marks_changed = (current_marks_snapshot != last_marks)
@@ -1029,7 +980,7 @@ def render_loop(
         # else changed, so drive/speed issues show up promptly instead of
         # waiting for the next slide change. This is a much cheaper partial
         # update than a full scene redraw (see need_to_render handling
-        # below), since only three lines of text and a histogram change.
+        # below), since only three lines of text change.
         need_status_refresh = (now - last_status_render_time) >= STATUS_REFRESH_SECONDS
 
         # --- Slide switching logic ---
@@ -1191,8 +1142,7 @@ def render_loop(
 
             # Diagnostics overlay: drawn last, on top of everything
             # (including black-screen mode) so stalls are visible.
-            status_box_rect = draw_status_overlay(screen, status_font, paused, drive_ok, download_bytes_per_sec)
-            draw_load_history_overlay(screen, status_box_rect, load_history_snapshot)
+            draw_status_overlay(screen, status_font, paused, drive_ok, download_bytes_per_sec)
 
             pygame.display.flip()
             last_status_render_time = now
@@ -1202,10 +1152,7 @@ def render_loop(
             # push only that region, instead of re-rendering and flipping
             # the whole scene purely to refresh three lines of text.
             status_box_rect = draw_status_overlay(screen, status_font, paused, drive_ok, download_bytes_per_sec)
-            histogram_rect = draw_load_history_overlay(screen, status_box_rect, load_history_snapshot)
-
-            update_rect = status_box_rect.union(histogram_rect) if histogram_rect else status_box_rect
-            pygame.display.update(update_rect)
+            pygame.display.update(status_box_rect)
             last_status_render_time = now
 
         if need_advance:
