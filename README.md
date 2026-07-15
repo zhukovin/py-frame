@@ -8,6 +8,11 @@ The photos are read from a remote NAS on the same LAN via an NFS mounted folder.
 WiFi or Ethernet config of the RPi is out of scope of this guide. Just configure networking
 that you prefer and put it on the same LAN as the NAS that stores the photos.
 
+## RPi SSH Authentication
+
+User: pi
+Pass: pi
+
 ## Testing
 
 This project includes a comprehensive test suite with **70% coverage** and **48 tests** covering all critical business logic.
