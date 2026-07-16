@@ -844,6 +844,67 @@ def load_settings(controller: SlideshowController):
         controller.shuffle_enabled = bool(data["shuffle_enabled"])
 
 
+CONFIG_FILE = "py-frame.conf"
+DEFAULT_NIGHT_START = (22, 0)
+DEFAULT_NIGHT_END = (7, 0)
+
+
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    hour_str, _, minute_str = value.strip().partition(":")
+    hour = int(hour_str)
+    minute = int(minute_str) if minute_str else 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"time out of range: {value!r}")
+    return hour, minute
+
+
+def load_schedule_config(path: str = CONFIG_FILE) -> tuple[tuple[int, int], tuple[int, int]]:
+    """
+    Read the auto-scheduling night window (start, end) from an INI-style
+    config file, e.g.:
+
+        [schedule]
+        start = 22:00
+        end = 07:00
+
+    Falls back to the DEFAULT_NIGHT_START/END window when the file is
+    missing or malformed, so a bad or absent config never blocks startup.
+    """
+    if not os.path.exists(path):
+        return DEFAULT_NIGHT_START, DEFAULT_NIGHT_END
+
+    import configparser
+
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(path)
+        start = _parse_hhmm(parser.get("schedule", "start", fallback="22:00"))
+        end = _parse_hhmm(parser.get("schedule", "end", fallback="07:00"))
+    except (configparser.Error, ValueError):
+        logger.warning(f"Could not parse {path}, using default schedule 22:00-07:00", exc_info=True)
+        return DEFAULT_NIGHT_START, DEFAULT_NIGHT_END
+
+    return start, end
+
+
+def is_within_night_window(hour: int, minute: int, start: tuple[int, int], end: tuple[int, int]) -> bool:
+    """
+    True if hour:minute falls within the [start, end) night window.
+    Handles windows that wrap past midnight (e.g. 22:00 -> 07:00) as well
+    as same-day windows (e.g. 13:00 -> 15:00). A zero-length window
+    (start == end) never counts as night.
+    """
+    now_minutes = hour * 60 + minute
+    start_minutes = start[0] * 60 + start[1]
+    end_minutes = end[0] * 60 + end[1]
+
+    if start_minutes == end_minutes:
+        return False
+    if start_minutes < end_minutes:
+        return start_minutes <= now_minutes < end_minutes
+    return now_minutes >= start_minutes or now_minutes < end_minutes
+
+
 def reclassify_pattern_type(slides: List[Slide], original_ptype: int) -> Optional[int]:
     """
     Decide how a history entry should be classified after some of its slides
@@ -977,6 +1038,8 @@ def render_loop(
         producer_done: threading.Event,
         controller: SlideshowController,
         seconds_to_display: int = 15,
+        night_start: tuple[int, int] = DEFAULT_NIGHT_START,
+        night_end: tuple[int, int] = DEFAULT_NIGHT_END,
 ):
     import time
     import os
@@ -1025,15 +1088,15 @@ def render_loop(
     while running:
         now = time.time()
 
-        # --- Time-based schedule: 22:00–07:00 => screen off ---
+        # --- Time-based schedule (configured via py-frame.conf) => screen off ---
         lt = time.localtime(now)
-        hour = lt.tm_hour
-        is_night = (hour >= 22 or hour < 7)
+        is_night = is_within_night_window(lt.tm_hour, lt.tm_min, night_start, night_end)
 
         if prev_is_night is None:
             prev_is_night = is_night
 
-        if is_night != prev_is_night:
+        night_transition = is_night != prev_is_night
+        if night_transition:
             # We just crossed the boundary (day -> night or night -> day)
             if is_night:
                 # Entering night: auto screen_off + pause
@@ -1129,6 +1192,12 @@ def render_loop(
 
         # If we just turned screen_on/off, we should redraw
         if cmd and cmd.get("type") in ("screen_off", "screen_on"):
+            need_to_render = True
+
+        # Automatic day/night boundary crossing also needs an immediate
+        # redraw -- otherwise the last slide stays on screen (only the
+        # status corner keeps refreshing) until something else changes it.
+        if night_transition:
             need_to_render = True
 
         # Refresh just the diagnostics corner periodically even if nothing
@@ -1380,6 +1449,7 @@ def main():
     controller = SlideshowController()
     load_exclusions(controller)
     load_settings(controller)
+    night_start, night_end = load_schedule_config()
 
     list_path = sys.argv[1]
     file_paths = read_file_list(list_path, shuffle=controller.shuffle_enabled)
@@ -1406,7 +1476,8 @@ def main():
     fetcher.start()
 
     # Start render loop in main thread
-    render_loop(shared_deque, lock, not_full, producer_done, controller, seconds_to_display)
+    render_loop(shared_deque, lock, not_full, producer_done, controller, seconds_to_display,
+                night_start=night_start, night_end=night_end)
 
 
 if __name__ == "__main__":
