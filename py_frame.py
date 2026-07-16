@@ -646,9 +646,10 @@ def draw_status_overlay(screen: pygame.Surface,
     text_surfaces = [font.render(line, True, BLACK) for line in lines]
     outline_surfaces = [font.render(line, True, WHITE) for line in lines]
 
-    x = box_rect.x + STATUS_PADDING + STATUS_OUTLINE_PX
+    right_edge = box_rect.right - STATUS_PADDING - STATUS_OUTLINE_PX
     y = box_rect.y + STATUS_PADDING + STATUS_OUTLINE_PX
     for text_surf, outline_surf in zip(text_surfaces, outline_surfaces):
+        x = right_edge - text_surf.get_width()
         for dx in range(-STATUS_OUTLINE_PX, STATUS_OUTLINE_PX + 1):
             for dy in range(-STATUS_OUTLINE_PX, STATUS_OUTLINE_PX + 1):
                 if dx == 0 and dy == 0:
