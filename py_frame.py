@@ -15,9 +15,14 @@ import faulthandler
 import signal
 import resource
 import os
+import logging
 
 
 faulthandler.register(signal.SIGUSR1)
+
+logger = logging.getLogger("py_frame")
+
+ERROR_LOG_FILE = "app_errors.log"
 
 Orientation = Literal["P", "L"]  # P = Portrait, L = Landscape
 
@@ -29,6 +34,64 @@ MAX_HISTORY_SCREENS = 5  # or 20, tune as you like
 def log_mem(tag=""):
     usage = resource.getrusage(resource.RUSAGE_SELF)
     print(f"[MEM {tag}] pid={os.getpid()} rss={usage.ru_maxrss} B")
+
+
+_logging_configured = False
+
+
+def setup_logging():
+    """
+    Configure a rotating file handler on the root logger so every
+    exception -- caught-and-handled or truly uncaught, from any thread
+    (main, image fetcher, Flask's web server) -- ends up in ERROR_LOG_FILE
+    for later analysis, in addition to the usual terminal/journal output.
+
+    Attached to the root logger (not just "py_frame") specifically so
+    Flask's own app.logger, which propagates to root by default, is
+    captured too without needing any changes in web_server.py. Safe to
+    call more than once (e.g. across tests) -- only configures once.
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+    _logging_configured = True
+
+    import sys
+    from logging.handlers import RotatingFileHandler
+
+    file_handler = RotatingFileHandler(ERROR_LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
+    console_handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s")
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+    uncaught_logger = logging.getLogger("py_frame.uncaught")
+
+    def log_uncaught_main_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        uncaught_logger.critical(
+            "Uncaught exception in main thread",
+            exc_info=(exc_type, exc_value, exc_traceback),
+        )
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+    sys.excepthook = log_uncaught_main_exception
+
+    def log_uncaught_thread_exception(args):
+        uncaught_logger.critical(
+            f"Uncaught exception in thread {args.thread.name!r}",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+        threading.__excepthook__(args)
+
+    threading.excepthook = log_uncaught_thread_exception
 
 
 @dataclass
@@ -370,7 +433,7 @@ def image_fetcher_thread(
                 # drive down or discard the legitimate rolling speed
                 # average, but the read itself succeeded so still log its
                 # size/time as a valid measurement.
-                print(f"Skipping unreadable image {path}: {e}")
+                logger.warning(f"Skipping unreadable image {path}", exc_info=True)
                 _record_load_attempt(controller, success=False, update_drive_status=False)
                 log_load_measurement(
                     controller.measurements_file, path, "decode_error",
@@ -378,8 +441,8 @@ def image_fetcher_thread(
                 )
                 time.sleep(0.5)
                 continue
-            except Exception as e:
-                print(f"Failed to load {path}: {e}")
+            except Exception:
+                logger.error(f"Failed to load {path}", exc_info=True)
                 recent_load_stats.clear()
                 _record_load_attempt(controller, success=False)
                 log_load_measurement(controller.measurements_file, path, "io_error")
@@ -721,6 +784,7 @@ def load_settings(controller: SlideshowController):
         with open(controller.settings_file, "r") as f:
             data = json.load(f)
     except (OSError, ValueError):
+        logger.warning(f"Could not read {controller.settings_file}, using defaults", exc_info=True)
         return
 
     if "shuffle_enabled" in data:
@@ -1232,6 +1296,8 @@ def read_file_list(list_path: str, shuffle: bool = True) -> List[str]:
 
 def main():
     import sys
+
+    setup_logging()
 
     print("Main thread native_id:", threading.get_native_id())
 

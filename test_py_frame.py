@@ -7,10 +7,14 @@ from collections import deque
 from itertools import product
 import pygame
 import os
+import sys
+import logging
 import tempfile
 import threading
 from unittest.mock import Mock, MagicMock, patch
 from PIL import Image
+
+import py_frame
 
 # Import the test function and dependencies from py_frame
 from py_frame import (
@@ -36,6 +40,7 @@ from py_frame import (
     read_file_list,
     image_fetcher_thread,
     log_load_measurement,
+    setup_logging,
     main,
     Orientation
 )
@@ -1099,6 +1104,87 @@ class TestReadFileList:
         mock_shuffle.assert_not_called()
 
 
+class TestSetupLogging:
+    """Test suite for setup_logging, which routes every exception (caught
+    and logged, or truly uncaught) to a rotating log file for later
+    analysis, in addition to the normal terminal/journal output"""
+
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.log_file = os.path.join(self.temp_dir, "test_errors.log")
+
+        # setup_logging mutates process-wide state (root logger handlers,
+        # sys.excepthook, threading.excepthook, and its own "already ran"
+        # guard) -- snapshot it all so each test starts clean and other
+        # tests/files aren't affected by what runs here.
+        self.root_logger = logging.getLogger()
+        self.prev_handlers = list(self.root_logger.handlers)
+        self.prev_level = self.root_logger.level
+        self.prev_sys_excepthook = sys.excepthook
+        self.prev_thread_excepthook = threading.excepthook
+        self.prev_configured = py_frame._logging_configured
+        py_frame._logging_configured = False
+
+    def teardown_method(self):
+        for h in list(self.root_logger.handlers):
+            if h not in self.prev_handlers:
+                self.root_logger.removeHandler(h)
+        self.root_logger.setLevel(self.prev_level)
+        sys.excepthook = self.prev_sys_excepthook
+        threading.excepthook = self.prev_thread_excepthook
+        py_frame._logging_configured = self.prev_configured
+
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_logged_exception_appears_in_the_file(self):
+        """Test that logger.error(..., exc_info=True) anywhere in the app
+        ends up in the log file with a full traceback"""
+        with patch("py_frame.ERROR_LOG_FILE", self.log_file):
+            setup_logging()
+
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            logging.getLogger("py_frame").error("something failed", exc_info=True)
+
+        with open(self.log_file) as f:
+            content = f.read()
+
+        assert "something failed" in content
+        assert "ValueError: boom" in content
+
+    def test_is_idempotent(self):
+        """Test that calling setup_logging twice doesn't add duplicate
+        handlers (e.g. across multiple test runs in the same process)"""
+        with patch("py_frame.ERROR_LOG_FILE", self.log_file):
+            setup_logging()
+            handlers_after_first = len(self.root_logger.handlers)
+            setup_logging()
+            handlers_after_second = len(self.root_logger.handlers)
+
+        assert handlers_after_first == handlers_after_second
+
+    def test_uncaught_thread_exception_is_logged(self):
+        """Test that an uncaught exception in a background thread is
+        logged via threading.excepthook, not just silently printed"""
+        with patch("py_frame.ERROR_LOG_FILE", self.log_file):
+            setup_logging()
+
+        def boom():
+            raise RuntimeError("thread boom")
+
+        t = threading.Thread(target=boom)
+        t.start()
+        t.join()
+
+        with open(self.log_file) as f:
+            content = f.read()
+
+        assert "Uncaught exception in thread" in content
+        assert "RuntimeError: thread boom" in content
+
+
 class TestMainEmptyFileList:
     """Test suite for main()'s handling of an empty/invalid photo list"""
 
@@ -1116,9 +1202,13 @@ class TestMainEmptyFileList:
         with open(self.list_path, "w") as f:
             f.write("not_a_photo.txt\n")
 
-        with patch("sys.argv", ["py_frame.py", self.list_path]):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
+        # setup_logging() has real side effects (creates a log file in the
+        # cwd, mutates sys.excepthook/threading.excepthook) that are
+        # irrelevant to this test and would otherwise leak into the repo.
+        with patch("py_frame.setup_logging"):
+            with patch("sys.argv", ["py_frame.py", self.list_path]):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
 
         assert exc_info.value.code == 1
 
