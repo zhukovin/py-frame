@@ -1093,12 +1093,15 @@ def render_loop(
         lt = time.localtime(now)
         is_night = is_within_night_window(lt.tm_hour, lt.tm_min, night_start, night_end)
 
-        if prev_is_night is None:
-            prev_is_night = is_night
-
-        night_transition = is_night != prev_is_night
+        # prev_is_night starts as None (unknown) rather than seeded to
+        # is_night, so a restart that happens *during* the night window
+        # still applies black_screen/paused immediately below instead of
+        # silently skipping it until the next boundary crossing -- e.g. a
+        # power-outage reboot at 2am shouldn't leave the screen bright.
+        night_transition = prev_is_night is None or is_night != prev_is_night
         if night_transition:
-            # We just crossed the boundary (day -> night or night -> day)
+            # We just crossed the boundary (day -> night or night -> day),
+            # or this is the first tick after startup.
             if is_night:
                 # Entering night: auto screen_off + pause
                 with controller.lock:
