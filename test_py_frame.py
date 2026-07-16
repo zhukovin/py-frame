@@ -325,7 +325,7 @@ class TestLogLoadMeasurement:
         with open(self.log_file) as f:
             lines = f.readlines()
 
-        assert lines[0].strip() == "timestamp,path,outcome,bytes,seconds,bytes_per_sec"
+        assert lines[0].strip() == "timestamp,path,outcome,bytes,seconds,bytes_per_sec,error_type"
         assert len(lines) == 3  # header + 2 rows
 
     def test_ok_outcome_records_full_measurement(self):
@@ -337,24 +337,39 @@ class TestLogLoadMeasurement:
         assert int(row["bytes"]) == 1000
         assert float(row["seconds"]) == 0.5
         assert float(row["bytes_per_sec"]) == 2000.0
+        assert row["error_type"] == ""
 
     def test_decode_error_still_records_the_valid_read_measurement(self):
-        log_load_measurement(self.log_file, "bad.jpg", "decode_error", load_bytes=500, load_seconds=0.25)
+        log_load_measurement(
+            self.log_file, "bad.jpg", "decode_error", load_bytes=500, load_seconds=0.25,
+            error_type="UnidentifiedImageError",
+        )
 
         row = self._read_rows()[0]
         assert row["outcome"] == "decode_error"
         assert int(row["bytes"]) == 500
         assert float(row["seconds"]) == 0.25
         assert float(row["bytes_per_sec"]) == 2000.0
+        assert row["error_type"] == "UnidentifiedImageError"
 
     def test_io_error_leaves_measurement_fields_blank(self):
-        log_load_measurement(self.log_file, "missing.jpg", "io_error")
+        log_load_measurement(self.log_file, "missing.jpg", "io_error", error_type="ConnectionResetError")
 
         row = self._read_rows()[0]
         assert row["outcome"] == "io_error"
         assert row["bytes"] == ""
         assert row["seconds"] == ""
         assert row["bytes_per_sec"] == ""
+        assert row["error_type"] == "ConnectionResetError"
+
+    def test_file_not_found_outcome_is_distinct_from_io_error(self):
+        log_load_measurement(self.log_file, "gone.jpg", "file_not_found", error_type="FileNotFoundError")
+
+        row = self._read_rows()[0]
+        assert row["outcome"] == "file_not_found"
+        assert row["error_type"] == "FileNotFoundError"
+        assert row["bytes"] == ""
+        assert row["seconds"] == ""
 
 
 class TestSmoothscaleSafe:
@@ -1298,21 +1313,44 @@ class TestImageFetcherThreadThrottling:
         assert all(c == 0.5 for c in sleep_calls)
         assert len(dq) == 0
 
-    def test_load_failure_marks_drive_not_ok(self):
-        """A failed load should flag the drive as unreadable and clear the
-        speed estimate, so the on-screen diagnostics reflect the stall"""
+    def test_generic_load_failure_marks_drive_not_ok(self):
+        """A genuine I/O failure (not a missing file) should flag the drive
+        as unreadable and clear the speed estimate, so the on-screen
+        diagnostics reflect the stall"""
         self.controller.drive_ok = True
         self.controller.download_bytes_per_sec = 123.0
 
-        self._run_with_bounded_sleep(["/nonexistent/path/does_not_exist.jpg"])
+        with patch("py_frame.load_slide", side_effect=ConnectionResetError("simulated reset")):
+            self._run_with_bounded_sleep(["irrelevant-path.jpg"])
 
         assert self.controller.drive_ok is False
         assert self.controller.download_bytes_per_sec is None
 
         rows = self._read_measurement_rows()
         assert rows[-1]["outcome"] == "io_error"
+        assert rows[-1]["error_type"] == "ConnectionResetError"
         assert rows[-1]["bytes"] == ""
         assert rows[-1]["seconds"] == ""
+
+    def test_file_not_found_does_not_mark_drive_disconnected(self):
+        """A single missing file (deleted/renamed on the NAS, a stale list
+        entry, etc) should NOT be reported as a drive disconnect -- it says
+        nothing about whether the mount itself is reachable"""
+        self.controller.drive_ok = True
+        self.controller.download_bytes_per_sec = 123.0
+
+        self._run_with_bounded_sleep(["/nonexistent/path/does_not_exist.jpg"])
+
+        # Recorded distinctly from a generic io_error...
+        rows = self._read_measurement_rows()
+        assert rows[-1]["outcome"] == "file_not_found"
+        assert rows[-1]["error_type"] == "FileNotFoundError"
+        assert rows[-1]["bytes"] == ""
+        assert rows[-1]["seconds"] == ""
+
+        # ...and the drive/speed diagnostics are left untouched.
+        assert self.controller.drive_ok is True
+        assert self.controller.download_bytes_per_sec == 123.0
 
     def test_corrupt_file_does_not_mark_drive_disconnected(self):
         """A bad/corrupt file (readable, but not a valid image) should NOT

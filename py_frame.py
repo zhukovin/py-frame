@@ -348,19 +348,28 @@ def _record_load_attempt(controller: SlideshowController,
         controller.download_bytes_per_sec = bytes_per_sec
 
 
-def log_load_measurement(log_file: str, path: str, outcome: str, load_bytes: int = 0, load_seconds: float = 0.0):
+def log_load_measurement(log_file: str, path: str, outcome: str, load_bytes: int = 0,
+                         load_seconds: float = 0.0, error_type: str = ""):
     """
     Append one load-attempt measurement to a CSV file for later offline
     analysis of size/time/speed correlation (e.g. "why is loading time or
     transfer speed inconsistent"). One row per attempt, regardless of
     outcome:
-        outcome="ok"           - full success; bytes/seconds/speed are valid
-        outcome="decode_error" - the raw read succeeded (bytes/seconds are
-                                  still valid) but the image itself was
-                                  corrupt/unsupported
-        outcome="io_error"     - the read itself failed (missing file,
-                                  disconnected mount, etc); no measurement
-                                  was possible, so bytes/seconds are blank
+        outcome="ok"             - full success; bytes/seconds/speed are valid
+        outcome="decode_error"   - the raw read succeeded (bytes/seconds are
+                                    still valid) but the image itself was
+                                    corrupt/unsupported
+        outcome="file_not_found" - this one path doesn't exist (deleted/
+                                    renamed on the NAS, a stale list entry,
+                                    etc) -- says nothing about whether the
+                                    drive/mount itself is reachable
+        outcome="io_error"       - some other read failure (disconnected
+                                    mount, permission error, timeout, etc);
+                                    no measurement was possible, so
+                                    bytes/seconds are blank
+    error_type is the underlying exception's class name (e.g.
+    "FileNotFoundError", "UnidentifiedImageError", "ConnectionResetError"),
+    for telling apart *why* a failure happened, not just that it did.
     """
     import csv
     from datetime import datetime
@@ -372,7 +381,7 @@ def log_load_measurement(log_file: str, path: str, outcome: str, load_bytes: int
     with open(log_file, "a", newline="") as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["timestamp", "path", "outcome", "bytes", "seconds", "bytes_per_sec"])
+            writer.writerow(["timestamp", "path", "outcome", "bytes", "seconds", "bytes_per_sec", "error_type"])
         writer.writerow([
             datetime.now().isoformat(timespec="seconds"),
             path,
@@ -380,6 +389,7 @@ def log_load_measurement(log_file: str, path: str, outcome: str, load_bytes: int
             load_bytes if has_measurement else "",
             f"{load_seconds:.4f}" if has_measurement else "",
             f"{bytes_per_sec:.2f}" if bytes_per_sec != "" else "",
+            error_type,
         ])
 
 
@@ -438,14 +448,31 @@ def image_fetcher_thread(
                 log_load_measurement(
                     controller.measurements_file, path, "decode_error",
                     load_bytes=e.load_bytes, load_seconds=e.load_seconds,
+                    error_type=type(e.__cause__).__name__ if e.__cause__ else type(e).__name__,
                 )
                 time.sleep(0.5)
                 continue
-            except Exception:
+            except FileNotFoundError as e:
+                # This one path doesn't exist -- e.g. deleted/renamed on the
+                # NAS, or a stale list entry. Says nothing about whether the
+                # drive/mount itself is reachable, so don't flag it down or
+                # discard the rolling speed average (unlike a real io_error).
+                logger.warning(f"Photo not found: {path}", exc_info=True)
+                _record_load_attempt(controller, success=False, update_drive_status=False)
+                log_load_measurement(
+                    controller.measurements_file, path, "file_not_found",
+                    error_type=type(e).__name__,
+                )
+                time.sleep(0.5)
+                continue
+            except Exception as e:
                 logger.error(f"Failed to load {path}", exc_info=True)
                 recent_load_stats.clear()
                 _record_load_attempt(controller, success=False)
-                log_load_measurement(controller.measurements_file, path, "io_error")
+                log_load_measurement(
+                    controller.measurements_file, path, "io_error",
+                    error_type=type(e).__name__,
+                )
                 time.sleep(0.5)
                 continue
 
