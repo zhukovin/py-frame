@@ -29,6 +29,7 @@ from py_frame import (
     blit_scaled,
     draw_slot_overlay,
     draw_status_overlay,
+    compute_status_box_rect,
     format_speed,
     compute_pattern_rects,
     load_exclusions,
@@ -484,32 +485,38 @@ class TestDrawStatusOverlay:
         """Clean up pygame"""
         pygame.quit()
 
-    def test_draws_light_gray_box_in_bottom_right_corner(self):
-        """Test that a light-gray box appears near the bottom-right corner,
-        and the rest of the screen is left untouched"""
+    def test_draws_black_text_with_white_outline_and_no_background_fill(self):
+        """Test that the status text renders as black-with-white-outline,
+        and that the box is no longer a solid filled background -- the
+        original background must still show through around/between glyphs"""
         screen = pygame.Surface((400, 300))
-        screen.fill((0, 0, 0))
+        screen.fill((10, 10, 10))  # distinct from black/white so it's unambiguous
 
-        draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_bytes_per_sec=150.0)
+        box_rect = draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_bytes_per_sec=150.0)
 
-        # draw_status_overlay uses a 10px margin from the screen edge, so
-        # probe just inside that margin rather than the literal corner pixel.
-        corner_pixel = screen.get_at((388, 288))[:3]
-        assert corner_pixel == (211, 211, 211)
+        colors_in_box = set()
+        for x in range(box_rect.x, box_rect.right, 2):
+            for y in range(box_rect.y, box_rect.bottom, 2):
+                colors_in_box.add(screen.get_at((x, y))[:3])
 
+        assert (255, 255, 255) in colors_in_box, "expected a white outline pixel somewhere in the box"
+        assert (0, 0, 0) in colors_in_box, "expected a black text pixel somewhere in the box"
+        assert (10, 10, 10) in colors_in_box, "expected the original background to still show through (no fill)"
+
+        # Well outside the box entirely: background is completely untouched
         far_pixel = screen.get_at((5, 5))[:3]
-        assert far_pixel == (0, 0, 0)
+        assert far_pixel == (10, 10, 10)
 
     def test_handles_missing_download_speed(self):
-        """Test that a None download_bytes_per_sec (e.g. before the first successful
-        load) doesn't crash and still draws the box"""
+        """Test that a None download_bytes_per_sec (e.g. before the first
+        successful load) doesn't crash and still draws the text"""
         screen = pygame.Surface((400, 300))
         screen.fill((0, 0, 0))
 
-        draw_status_overlay(screen, self.font, paused=True, drive_ok=False, download_bytes_per_sec=None)
+        box_rect = draw_status_overlay(screen, self.font, paused=True, drive_ok=False, download_bytes_per_sec=None)
 
-        corner_pixel = screen.get_at((388, 288))[:3]
-        assert corner_pixel == (211, 211, 211)
+        colors_in_box = {screen.get_at((x, box_rect.centery))[:3] for x in range(box_rect.x, box_rect.right)}
+        assert (255, 255, 255) in colors_in_box
 
     def test_box_stays_within_screen_bounds_on_small_screen(self):
         """Test that a very small screen doesn't cause the overlay to error out"""
@@ -531,10 +538,9 @@ class TestDrawStatusOverlay:
         assert box_rect.bottom == 300 - 10  # 10px margin from the bottom edge
 
     def test_box_width_is_stable_across_drive_status_transitions(self):
-        """Test that the box (and therefore the histogram to its left) does
-        not change width when the drive status text changes -- otherwise the
-        histogram would shrink exactly when a disconnect makes "Drive:
-        DISCONNECTED" wider than "Drive: OK", i.e. when it's needed most"""
+        """Test that the box's position/size doesn't change when the drive
+        status text changes (e.g. "Drive: OK" -> "Drive: DISCONNECTED"), so
+        a text-only refresh always erases/redraws the exact same region"""
         screen = pygame.Surface((800, 300))
 
         ok_rect = draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_bytes_per_sec=1000.0)
@@ -542,6 +548,30 @@ class TestDrawStatusOverlay:
 
         assert ok_rect.width == disconnected_rect.width
         assert ok_rect.x == disconnected_rect.x
+
+    def test_uses_the_given_box_rect_instead_of_recomputing(self):
+        """Test that passing an explicit box_rect is honored verbatim (this
+        is what lets render_loop snapshot/restore the exact same region
+        every time, regardless of what the text currently says)"""
+        screen = pygame.Surface((400, 300))
+        explicit_rect = pygame.Rect(20, 30, 200, 90)
+
+        returned_rect = draw_status_overlay(
+            screen, self.font, paused=False, drive_ok=True, download_bytes_per_sec=1.0,
+            box_rect=explicit_rect,
+        )
+
+        assert returned_rect == explicit_rect
+
+    def test_computed_box_rect_matches_default_drawing_rect(self):
+        """Test that compute_status_box_rect (called upfront by render_loop)
+        produces the same rect draw_status_overlay would compute on its own"""
+        screen = pygame.Surface((400, 300))
+
+        expected = compute_status_box_rect(screen, self.font)
+        actual = draw_status_overlay(screen, self.font, paused=False, drive_ok=True, download_bytes_per_sec=1.0)
+
+        assert expected == actual
 
 
 class TestComputePatternRects:

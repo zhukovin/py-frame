@@ -579,57 +579,83 @@ def format_speed(bytes_per_sec: Optional[float]) -> str:
     return f"{value:.2f} {units[-1]}"  # unreachable, satisfies static analysis
 
 
+STATUS_PADDING = 8
+STATUS_LINE_SPACING = 4
+STATUS_MARGIN = 10
+STATUS_OUTLINE_PX = 2
+# Sized against the worst case of each line (not whichever happens to be
+# showing right now), so the box's position/size stays stable across
+# Paused/Playing or Drive: OK/DISCONNECTED transitions.
+STATUS_FIXED_VOCABULARY = ["Paused", "Playing", "Drive: OK", "Drive: DISCONNECTED"]
+
+
+def compute_status_box_rect(screen: pygame.Surface, font: pygame.font.Font) -> pygame.Rect:
+    """
+    Compute the status overlay's bottom-right rect. Fixed size/position for
+    a given screen+font (independent of the current paused/drive_ok/speed
+    values), so callers can snapshot this exact region once and reuse it to
+    erase old text before redrawing -- there's no background box to do that
+    erasing for them anymore.
+    """
+    stable_widths = [font.size(text)[0] for text in STATUS_FIXED_VOCABULARY]
+    box_w = max(stable_widths) + 2 * STATUS_PADDING + 2 * STATUS_OUTLINE_PX
+    line_height = font.get_height()
+    box_h = (
+        line_height * 3
+        + STATUS_LINE_SPACING * 2
+        + 2 * STATUS_PADDING
+        + 2 * STATUS_OUTLINE_PX
+    )
+    screen_w, screen_h = screen.get_size()
+    return pygame.Rect(
+        screen_w - box_w - STATUS_MARGIN,
+        screen_h - box_h - STATUS_MARGIN,
+        box_w,
+        box_h,
+    )
+
+
 def draw_status_overlay(screen: pygame.Surface,
                         font: pygame.font.Font,
                         paused: bool,
                         drive_ok: bool,
-                        download_bytes_per_sec: Optional[float]) -> pygame.Rect:
+                        download_bytes_per_sec: Optional[float],
+                        box_rect: Optional[pygame.Rect] = None) -> pygame.Rect:
     """
-    Draw a small diagnostics box in the bottom-right corner: Playing/Paused,
-    drive mount health, and recent read speed. Drawn last (on top of
-    everything, including black-screen mode) so stalls can be diagnosed
-    without waiting for the next slide change.
+    Draw the status text -- Playing/Paused, drive mount health, and recent
+    read speed -- black with a white outline, no filled background, in the
+    bottom-right corner. Drawn last (on top of everything, including
+    black-screen mode) so stalls can be diagnosed without waiting for the
+    next slide change.
 
-    Returns the box's rect so callers can restrict a partial-screen update
-    to just this region when nothing else on screen changed.
+    Pass the same box_rect (from compute_status_box_rect) every call so the
+    text is always positioned identically; this is what the caller
+    snapshots/restores to erase old text before redrawing (see render_loop).
     """
-    LIGHT_GRAY = (211, 211, 211)
     BLACK = (0, 0, 0)
+    WHITE = (255, 255, 255)
+
+    if box_rect is None:
+        box_rect = compute_status_box_rect(screen, font)
 
     lines = [
         "Paused" if paused else "Playing",
         "Drive: OK" if drive_ok else "Drive: DISCONNECTED",
         format_speed(download_bytes_per_sec),
     ]
-
-    padding = 8
-    line_spacing = 2
     text_surfaces = [font.render(line, True, BLACK) for line in lines]
+    outline_surfaces = [font.render(line, True, WHITE) for line in lines]
 
-    # Size using the worst-case width of the fixed-vocabulary lines (not
-    # just whichever happens to be showing right now), so the box doesn't
-    # jump around on screen across Paused/Playing or Drive: OK/DISCONNECTED
-    # transitions.
-    fixed_vocabulary = ["Paused", "Playing", "Drive: OK", "Drive: DISCONNECTED"]
-    stable_widths = [font.size(text)[0] for text in fixed_vocabulary]
-    box_w = max(stable_widths + [s.get_width() for s in text_surfaces]) + 2 * padding
-    box_h = sum(s.get_height() for s in text_surfaces) + 2 * padding + line_spacing * (len(lines) - 1)
-
-    screen_w, screen_h = screen.get_size()
-    margin = 10
-    box_rect = pygame.Rect(
-        screen_w - box_w - margin,
-        screen_h - box_h - margin,
-        box_w,
-        box_h,
-    )
-
-    pygame.draw.rect(screen, LIGHT_GRAY, box_rect)
-
-    y = box_rect.y + padding
-    for surf in text_surfaces:
-        screen.blit(surf, (box_rect.x + padding, y))
-        y += surf.get_height() + line_spacing
+    x = box_rect.x + STATUS_PADDING + STATUS_OUTLINE_PX
+    y = box_rect.y + STATUS_PADDING + STATUS_OUTLINE_PX
+    for text_surf, outline_surf in zip(text_surfaces, outline_surfaces):
+        for dx in range(-STATUS_OUTLINE_PX, STATUS_OUTLINE_PX + 1):
+            for dy in range(-STATUS_OUTLINE_PX, STATUS_OUTLINE_PX + 1):
+                if dx == 0 and dy == 0:
+                    continue
+                screen.blit(outline_surf, (x + dx, y + dy))
+        screen.blit(text_surf, (x, y))
+        y += text_surf.get_height() + STATUS_LINE_SPACING
 
     return box_rect
 
@@ -976,6 +1002,13 @@ def render_loop(
     pygame.mouse.set_visible(False)
     font = pygame.font.SysFont(None, 40)
     status_font = pygame.font.SysFont(None, 46)
+    status_box_rect = compute_status_box_rect(screen, status_font)
+    # Snapshot of whatever's behind the status text, taken right after each
+    # full scene redraw (before the text is drawn). There's no background
+    # box anymore, so when only the text changes (e.g. the Kbps figure),
+    # this is what erases the old glyphs before the new ones are drawn --
+    # otherwise their white outlines would ghost through each other.
+    clean_status_corner: Optional[pygame.Surface] = None
 
     current_slides: list[Slide] = []
     current_pattern_type: Optional[int] = None
@@ -1262,18 +1295,30 @@ def render_loop(
                     # no slides, just clear
                     screen.fill((0, 0, 0))
 
+            # Snapshot whatever's behind the status text (before drawing
+            # it), so a later text-only refresh can erase the old glyphs
+            # cleanly -- there's no background box to do that anymore.
+            safe_status_rect = status_box_rect.clip(screen.get_rect())
+            if safe_status_rect.width > 0 and safe_status_rect.height > 0:
+                clean_status_corner = screen.subsurface(safe_status_rect).copy()
+            else:
+                clean_status_corner = None
+
             # Diagnostics overlay: drawn last, on top of everything
             # (including black-screen mode) so stalls are visible.
-            draw_status_overlay(screen, status_font, paused, drive_ok, download_bytes_per_sec)
+            draw_status_overlay(screen, status_font, paused, drive_ok, download_bytes_per_sec, box_rect=status_box_rect)
 
             pygame.display.flip()
             last_status_render_time = now
 
         elif need_status_refresh:
-            # Nothing else changed: repaint just the diagnostics corner and
-            # push only that region, instead of re-rendering and flipping
-            # the whole scene purely to refresh three lines of text.
-            status_box_rect = draw_status_overlay(screen, status_font, paused, drive_ok, download_bytes_per_sec)
+            # Nothing else changed: erase the old status text using the
+            # clean snapshot, redraw it, and push only that region --
+            # instead of re-rendering and flipping the whole scene purely
+            # to refresh three lines of text.
+            if clean_status_corner is not None:
+                screen.blit(clean_status_corner, safe_status_rect.topleft)
+            draw_status_overlay(screen, status_font, paused, drive_ok, download_bytes_per_sec, box_rect=status_box_rect)
             pygame.display.update(status_box_rect)
             last_status_render_time = now
 
