@@ -540,19 +540,27 @@ def draw_slot_overlay(screen: pygame.Surface,
                       font: pygame.font.Font):
     OLD_PAPER = (235, 222, 193)  # warm beige
     RED = (255, 64, 64)
+    BLACK = (0, 0, 0)
+    WHITE = (255, 255, 255)
     # border color
     color = RED if marked else OLD_PAPER
     pygame.draw.rect(screen, color, rect, 3)
 
-    # label box top-left
+    # label top-left -- black text with a white outline, no filled
+    # background, matching the status overlay's style (see
+    # draw_status_overlay).
     label = str(slot_index + 1)
-    text_surf = font.render(label, True, (0, 0, 0))
+    text_surf = font.render(label, True, BLACK)
+    outline_surf = font.render(label, True, WHITE)
     padding = 4
-    box_w = text_surf.get_width() + 2 * padding
-    box_h = text_surf.get_height() + 2 * padding
-    box_rect = pygame.Rect(rect.x + 8, rect.y + 8, box_w, box_h)
-    pygame.draw.rect(screen, color, box_rect)
-    screen.blit(text_surf, (box_rect.x + padding, box_rect.y + padding))
+    x = rect.x + 8 + padding
+    y = rect.y + 8 + padding
+    for dx in range(-STATUS_OUTLINE_PX, STATUS_OUTLINE_PX + 1):
+        for dy in range(-STATUS_OUTLINE_PX, STATUS_OUTLINE_PX + 1):
+            if dx == 0 and dy == 0:
+                continue
+            screen.blit(outline_surf, (x + dx, y + dy))
+    screen.blit(text_surf, (x, y))
 
 
 def format_speed(bytes_per_sec: Optional[float]) -> str:
