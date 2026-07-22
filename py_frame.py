@@ -1425,12 +1425,16 @@ def read_file_list(list_path: str, shuffle: bool = True) -> List[str]:
       shuffle=False - keep the file's original relative order, but start
                        from a random point and wrap around.
     """
+    VOLUMES_PREFIX = "/Volumes/"
+
     paths: List[str] = []
     with open(list_path, "r") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
+            if line.startswith(VOLUMES_PREFIX):
+                line = "nasus/" + line[len(VOLUMES_PREFIX):]
             # Only keep JPG/JPEG
             if line.lower().endswith((".jpg", ".jpeg")):
                 paths.append(line)

@@ -1086,10 +1086,24 @@ class TestReadFileList:
             f.write("video.mp4\n")
         
         paths = read_file_list(self.list_path)
-        
+
         assert len(paths) == 1
         assert paths[0] == "image1.jpg"
-    
+
+    def test_volumes_prefix_rewritten_to_nasus(self):
+        """Mac-mounted paths (/Volumes/...) get rewritten to the relative
+        nasus/ path the Pi's NFS symlink expects, so the same list file
+        works unmodified whether it was built on macOS or the Pi"""
+        with open(self.list_path, "w") as f:
+            f.write("/Volumes/MyNAS/photo/2020/img.jpg\n")
+            f.write("nasus/photo/already-relative.jpg\n")
+
+        paths = read_file_list(self.list_path)
+
+        assert "nasus/MyNAS/photo/2020/img.jpg" in paths
+        assert "nasus/photo/already-relative.jpg" in paths
+        assert not any(p.startswith("/Volumes/") for p in paths)
+
     def test_empty_file_list(self):
         """Test reading an empty file list"""
         with open(self.list_path, "w") as f:
