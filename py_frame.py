@@ -1588,16 +1588,12 @@ def read_file_list(list_path: str, shuffle: bool = True) -> List[ListEntry]:
     Images and videos stay interleaved in whatever order results -- shuffling
     ListEntry tuples keeps each path paired with its kind automatically.
     """
-    VOLUMES_PREFIX = "/Volumes/"
-
     entries: List[ListEntry] = []
     with open(list_path, "r") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            if line.startswith(VOLUMES_PREFIX):
-                line = "nasus/" + line[len(VOLUMES_PREFIX):]
             lower = line.lower()
             if lower.endswith(IMAGE_EXTENSIONS):
                 entries.append(ListEntry(line, "image"))

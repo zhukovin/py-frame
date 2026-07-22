@@ -1117,23 +1117,6 @@ class TestReadFileList:
         assert by_path["clip4.avi"] == "video"
         assert by_path["clip5.m4v"] == "video"
 
-    def test_volumes_prefix_rewritten_to_nasus(self):
-        """Mac-mounted paths (/Volumes/...) get rewritten to the relative
-        nasus/ path the Pi's NFS symlink expects, so the same list file
-        works unmodified whether it was built on macOS or the Pi"""
-        with open(self.list_path, "w") as f:
-            f.write("/Volumes/MyNAS/photo/2020/img.jpg\n")
-            f.write("/Volumes/MyNAS/video/clip.mp4\n")
-            f.write("nasus/photo/already-relative.jpg\n")
-
-        entries = read_file_list(self.list_path)
-        paths = [e.path for e in entries]
-
-        assert "nasus/MyNAS/photo/2020/img.jpg" in paths
-        assert "nasus/MyNAS/video/clip.mp4" in paths
-        assert "nasus/photo/already-relative.jpg" in paths
-        assert not any(p.startswith("/Volumes/") for p in paths)
-
     def test_shuffle_preserves_kind_alongside_path(self):
         """Test that shuffling a mixed image+video list keeps each path
         paired with its original kind (not just each path preserved)"""
