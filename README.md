@@ -64,6 +64,17 @@ For development and testing, also install:
 pip3 install pytest pytest-cov coverage
 ``` 
 
+### System dependency for video playback
+
+Videos in the photo list (see "Make a list of photos to display" below) are played full-screen
+via [mpv](https://mpv.io/), not decoded in Python -- the RPi has no spare CPU budget for
+software video decode.
+```bash
+sudo apt install mpv
+```
+If mpv isn't installed, video entries are silently skipped (logged once at startup) and only
+photos are shown.
+
 ## Get the code on RPi
 
 Clone the repo directly into the target folder:
@@ -244,7 +255,7 @@ how you list the files (old paths might not work and might need migration).
 
 Improvise from here:
 ```
-find nasus/photo/Camera\ Media/Camera\ Alexey -type f \( -iname '*.jpg' -o -iname '*.jpeg' \) >photo.alex.list
+find nasus/photo/Camera\ Media/Camera\ Alexey -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.mp4' -o -iname '*.mov' -o -iname '*.mkv' -o -iname '*.avi' -o -iname '*.m4v' \) >photo.alex.list
 ```
 or
 ```
@@ -253,6 +264,20 @@ ls nasus/photo/Camera\ Media/Camera\ Irina/20{18,19,20,21,22,23,24,25}/*.{jpg,JP
 ```
 
 The list is read from `photo.list` file.
+
+### Videos
+
+Lines ending in `.mp4`, `.mov`, `.mkv`, `.avi`, or `.m4v` are treated as videos and played
+full-screen via mpv (see "System dependency for video playback" above) at their position in the
+list -- they're never combined into the multi-photo grid layouts, and photos after a video won't
+be shown ahead of it. A few things work differently for videos than photos in this first pass:
+
+* Next/Prev during playback both just skip to the end of the video -- Prev doesn't seek back to
+  whatever photo preceded it.
+* Pause and the night-time auto screen-off only take effect once the currently playing video
+  finishes, not mid-playback.
+* There's no way to mark/exclude a bad video from the web UI -- edit `exclusions.txt` or the list
+  file directly.
 
 ## Make slideshow start on RPi boot
 

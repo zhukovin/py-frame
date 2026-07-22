@@ -36,7 +36,7 @@ class TestWebServer:
     def test_api_state_empty(self):
         """Test /api/state endpoint with no slides"""
         response = self.client.get('/api/state')
-        
+
         assert response.status_code == 200
         data = response.get_json()
         assert 'slides' in data
@@ -45,6 +45,17 @@ class TestWebServer:
         assert len(data['slides']) == 0
         assert data['paused'] is False
         assert data['black'] is False
+        assert data['video_playing'] is False
+
+    def test_api_state_reports_video_playing(self):
+        """Test /api/state reflects a queued/currently-playing video"""
+        self.controller.pending_video = "clip.mp4"
+
+        response = self.client.get('/api/state')
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['video_playing'] is True
     
     def test_api_state_with_slides(self):
         """Test /api/state endpoint with slides"""

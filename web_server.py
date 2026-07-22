@@ -35,7 +35,8 @@ def create_app(controller: "SlideshowController") -> Flask:
             ]
             paused = controller.paused
             black = controller.black_screen
-        return jsonify({"slides": slides, "paused": paused, "black": black})
+            video_playing = controller.pending_video is not None
+        return jsonify({"slides": slides, "paused": paused, "black": black, "video_playing": video_playing})
 
     @app.route("/api/mark", methods=["POST"])
     def api_mark():
@@ -186,6 +187,7 @@ async function refreshState() {
   const statusDiv = document.getElementById('status');
 
   let status = data.paused ? "PAUSED" : "PLAYING";
+  if (data.video_playing) status = "VIDEO PLAYING";
   if (data.black) status += " (SCREEN OFF)";
   statusDiv.textContent = "Status: " + status;
 

@@ -22,6 +22,7 @@ from py_frame import (
     SlideshowController,
     classify_pattern_type,
     extract_pattern_from_deque,
+    pop_next_screen_from_dq,
     make_old_paper_surface,
     load_slide,
     ImageDecodeError,
@@ -43,7 +44,11 @@ from py_frame import (
     log_load_measurement,
     setup_logging,
     main,
-    Orientation
+    Orientation,
+    ListEntry,
+    is_mpv_available,
+    play_video,
+    MPV_ARGS,
 )
 
 
@@ -1055,15 +1060,17 @@ class TestReadFileList:
             f.write("image2.JPG\n")
             f.write("image3.jpeg\n")
             f.write("image4.JPEG\n")
-        
-        paths = read_file_list(self.list_path)
-        
-        assert len(paths) == 4
+
+        entries = read_file_list(self.list_path)
+        paths = [e.path for e in entries]
+
+        assert len(entries) == 4
+        assert all(e.kind == "image" for e in entries)
         assert "image1.jpg" in paths
         assert "image2.JPG" in paths
         assert "image3.jpeg" in paths
         assert "image4.JPEG" in paths
-    
+
     def test_skip_comments_and_empty_lines(self):
         """Test that comments and empty lines are skipped"""
         with open(self.list_path, "w") as f:
@@ -1072,24 +1079,62 @@ class TestReadFileList:
             f.write("image1.jpg\n")
             f.write("  \n")
             f.write("image2.jpg\n")
-        
+
         paths = read_file_list(self.list_path)
-        
+
         assert len(paths) == 2
-    
-    def test_skip_non_jpg_files(self):
-        """Test that non-JPG files are filtered out"""
+
+    def test_skip_unsupported_extensions(self):
+        """Test that unsupported file extensions are filtered out"""
         with open(self.list_path, "w") as f:
             f.write("image1.jpg\n")
             f.write("image2.png\n")
             f.write("image3.gif\n")
-            f.write("video.mp4\n")
-        
-        paths = read_file_list(self.list_path)
-        
-        assert len(paths) == 1
-        assert paths[0] == "image1.jpg"
-    
+
+        entries = read_file_list(self.list_path)
+
+        assert len(entries) == 1
+        assert entries[0] == ListEntry("image1.jpg", "image")
+
+    def test_read_video_files(self):
+        """Test that video files are recognized and tagged with kind='video'"""
+        with open(self.list_path, "w") as f:
+            f.write("photo.jpg\n")
+            f.write("clip.mp4\n")
+            f.write("clip2.MOV\n")
+            f.write("clip3.mkv\n")
+            f.write("clip4.avi\n")
+            f.write("clip5.m4v\n")
+
+        entries = read_file_list(self.list_path)
+
+        assert len(entries) == 6
+        by_path = {e.path: e.kind for e in entries}
+        assert by_path["photo.jpg"] == "image"
+        assert by_path["clip.mp4"] == "video"
+        assert by_path["clip2.MOV"] == "video"
+        assert by_path["clip3.mkv"] == "video"
+        assert by_path["clip4.avi"] == "video"
+        assert by_path["clip5.m4v"] == "video"
+
+    def test_shuffle_preserves_kind_alongside_path(self):
+        """Test that shuffling a mixed image+video list keeps each path
+        paired with its original kind (not just each path preserved)"""
+        with open(self.list_path, "w") as f:
+            f.write("image1.jpg\n")
+            f.write("video1.mp4\n")
+            f.write("image2.jpg\n")
+            f.write("video2.mp4\n")
+
+        entries = read_file_list(self.list_path, shuffle=True)
+
+        assert sorted(entries) == sorted([
+            ListEntry("image1.jpg", "image"),
+            ListEntry("video1.mp4", "video"),
+            ListEntry("image2.jpg", "image"),
+            ListEntry("video2.mp4", "video"),
+        ])
+
     def test_empty_file_list(self):
         """Test reading an empty file list"""
         with open(self.list_path, "w") as f:
@@ -1102,9 +1147,10 @@ class TestReadFileList:
     def test_shuffles_the_full_list_not_just_a_rotation(self):
         """Test that the display order is a genuine shuffle (random.shuffle),
         not the old behavior of rotating by a random offset"""
-        expected = [f"image{i}.jpg" for i in range(10)]
+        names = [f"image{i}.jpg" for i in range(10)]
+        expected = [ListEntry(name, "image") for name in names]
         with open(self.list_path, "w") as f:
-            for name in expected:
+            for name in names:
                 f.write(name + "\n")
 
         with patch("random.shuffle") as mock_shuffle:
@@ -1116,27 +1162,29 @@ class TestReadFileList:
 
     def test_shuffle_preserves_every_entry_exactly_once(self):
         """Test that shuffling doesn't drop or duplicate any path"""
-        expected = [f"image{i}.jpg" for i in range(50)]
+        names = [f"image{i}.jpg" for i in range(50)]
+        expected = [ListEntry(name, "image") for name in names]
         with open(self.list_path, "w") as f:
-            for name in expected:
+            for name in names:
                 f.write(name + "\n")
 
-        paths = read_file_list(self.list_path)
+        entries = read_file_list(self.list_path)
 
-        assert sorted(paths) == sorted(expected)
+        assert sorted(entries) == sorted(expected)
 
     def test_shuffle_false_rotates_by_random_offset_preserving_relative_order(self):
         """Test that shuffle=False restores the original rotation behavior:
         same relative order as the file, just starting from a random point"""
-        expected = [f"image{i}.jpg" for i in range(10)]
+        names = [f"image{i}.jpg" for i in range(10)]
+        expected = [ListEntry(name, "image") for name in names]
         with open(self.list_path, "w") as f:
-            for name in expected:
+            for name in names:
                 f.write(name + "\n")
 
         with patch("random.randrange", return_value=3):
-            paths = read_file_list(self.list_path, shuffle=False)
+            entries = read_file_list(self.list_path, shuffle=False)
 
-        assert paths == expected[3:] + expected[:3]
+        assert entries == expected[3:] + expected[:3]
 
     def test_shuffle_false_does_not_call_random_shuffle(self):
         """Test that shuffle=False takes the rotation path, not the shuffle one"""
@@ -1289,7 +1337,13 @@ class TestImageFetcherThreadThrottling:
 
     def _run_with_bounded_sleep(self, file_paths, max_calls=3):
         """Run image_fetcher_thread with time.sleep mocked to raise after
-        max_calls, so the otherwise-infinite loop stops deterministically."""
+        max_calls, so the otherwise-infinite loop stops deterministically.
+        file_paths may be plain path strings (wrapped here as image
+        entries) or ListEntry instances (e.g. kind="video"), mixed freely."""
+        entries = [
+            p if isinstance(p, ListEntry) else ListEntry(p, "image")
+            for p in file_paths
+        ]
         sleep_calls = []
 
         def fake_sleep(seconds):
@@ -1312,7 +1366,7 @@ class TestImageFetcherThreadThrottling:
             with patch("time.sleep", side_effect=fake_sleep):
                 t = threading.Thread(
                     target=image_fetcher_thread,
-                    args=(file_paths, dq, lock, not_full, producer_done, self.controller, 5),
+                    args=(entries, dq, lock, not_full, producer_done, self.controller, 5),
                     daemon=True,
                 )
                 t.start()
@@ -1442,7 +1496,7 @@ class TestImageFetcherThreadThrottling:
             try:
                 t = threading.Thread(
                     target=image_fetcher_thread,
-                    args=([img_path], dq, lock, not_full, producer_done, self.controller, 5),
+                    args=([ListEntry(img_path, "image")], dq, lock, not_full, producer_done, self.controller, 5),
                     daemon=True,
                 )
                 t.start()
@@ -1463,6 +1517,205 @@ class TestImageFetcherThreadThrottling:
         finally:
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_video_entry_sets_pending_video_and_blocks(self):
+        """A video entry should be announced via controller.pending_video
+        immediately, and the fetcher should sit polling (not decode
+        anything or push to dq) until it's cleared"""
+        sleep_calls, dq = self._run_with_bounded_sleep([ListEntry("clip.mp4", "video")])
+
+        assert self.controller.pending_video == "clip.mp4"
+        assert len(dq) == 0
+        assert all(c == 0.2 for c in sleep_calls)
+
+    def test_video_boundary_resumes_after_pending_video_cleared(self):
+        """After a queued video's pending_video is cleared (simulating the
+        render loop finishing playback), the fetcher should resume loading
+        subsequent list entries rather than staying stuck"""
+        import time as time_module
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            img1_path = os.path.join(temp_dir, "img1.jpg")
+            img2_path = os.path.join(temp_dir, "img2.jpg")
+            Image.new("RGB", (50, 50), color="blue").save(img1_path)
+            Image.new("RGB", (50, 50), color="red").save(img2_path)
+
+            entries = [
+                ListEntry(img1_path, "image"),
+                ListEntry("clip.mp4", "video"),
+                ListEntry(img2_path, "image"),
+            ]
+
+            dq = deque()
+            lock = threading.Lock()
+            not_full = threading.Condition(lock)
+            producer_done = threading.Event()
+
+            def fake_notify_all():
+                # Called while `not_full` (== lock) is already held by the
+                # fetcher, so just inspect dq directly -- re-acquiring the
+                # lock here would deadlock.
+                if len(dq) >= 2:
+                    raise _StopFetcher()
+
+            def quiet_excepthook(args):
+                if args.exc_type is not _StopFetcher:
+                    threading.__excepthook__(args)
+
+            prev_excepthook = threading.excepthook
+            threading.excepthook = quiet_excepthook
+            prev_notify_all = not_full.notify_all
+            not_full.notify_all = fake_notify_all
+            try:
+                t = threading.Thread(
+                    target=image_fetcher_thread,
+                    args=(entries, dq, lock, not_full, producer_done, self.controller, 5),
+                    daemon=True,
+                )
+                t.start()
+
+                # Wait (real time -- time.sleep isn't mocked in this test)
+                # for the fetcher to reach and announce the video.
+                for _ in range(50):
+                    if self.controller.pending_video == "clip.mp4":
+                        break
+                    time_module.sleep(0.05)
+                else:
+                    pytest.fail("fetcher never announced the pending video")
+
+                assert len(dq) == 1  # only img1 loaded so far
+
+                # Simulate the render loop finishing playback.
+                self.controller.pending_video = None
+
+                t.join(timeout=2)
+            finally:
+                threading.excepthook = prev_excepthook
+                not_full.notify_all = prev_notify_all
+
+            assert not t.is_alive(), "fetcher thread did not resume after pending_video cleared"
+            assert len(dq) == 2
+            assert dq[1].path == img2_path
+        finally:
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+class TestPopNextScreenFromDq:
+    """Test suite for pop_next_screen_from_dq, which extends
+    extract_pattern_from_deque's full-pattern extraction with a fallback for
+    leftover photos stranded at a video boundary (fewer than 5 available,
+    none more coming until the video has played)."""
+
+    def test_solo_landscape_matches_extract_pattern_from_deque(self):
+        dq = deque(DummySlide(o) for o in "LPPPP")
+        slides, ptype = pop_next_screen_from_dq(dq)
+        assert ptype == 0
+        assert len(slides) == 1
+        assert slides[0].orientation == "L"
+        assert len(dq) == 4
+
+    def test_full_ppp_pattern_matches_extract_pattern_from_deque(self):
+        # Note: extract_pattern_from_deque stops scanning the moment the
+        # needed P/L counts are satisfied, so the two trailing L's here are
+        # dropped along with the rest of the popped window rather than
+        # preserved -- this is existing behavior (see
+        # test_extract_pattern_all_len5's identical early-break
+        # simulation), not something pop_next_screen_from_dq changes.
+        dq = deque(DummySlide(o) for o in "PPPLL")
+        slides, ptype = pop_next_screen_from_dq(dq)
+        assert ptype == 1
+        assert len(slides) == 3
+        assert len(dq) == 0
+
+    def test_partial_leftover_falls_back_to_solo_slide(self):
+        """Two leftover portraits (no valid PPP/PPLLL/PLLL fit) -- the
+        normal >=5-window path never hits this, only a video-boundary
+        drain with fewer than 5 buffered."""
+        dq = deque(DummySlide(o) for o in "PP")
+        slides, ptype = pop_next_screen_from_dq(dq)
+        assert ptype == 0
+        assert len(slides) == 1
+        assert slides[0].orientation == "P"
+        assert len(dq) == 1
+
+    def test_single_leftover_landscape(self):
+        dq = deque([DummySlide("L")])
+        slides, ptype = pop_next_screen_from_dq(dq)
+        assert ptype == 0
+        assert len(slides) == 1
+        assert len(dq) == 0
+
+    def test_empty_dq_raises(self):
+        with pytest.raises(ValueError):
+            pop_next_screen_from_dq(deque())
+
+
+class TestIsMpvAvailable:
+    def test_true_when_mpv_on_path(self):
+        with patch("shutil.which", return_value="/usr/bin/mpv"):
+            assert is_mpv_available() is True
+
+    def test_false_when_mpv_missing(self):
+        with patch("shutil.which", return_value=None):
+            assert is_mpv_available() is False
+
+
+class TestPlayVideo:
+    """Test suite for play_video's control flow: display teardown/reinit
+    and skip-on-next/prev. Real mpv/subprocess/framebuffer behavior is out
+    of scope -- untestable off a Raspberry Pi -- so subprocess.Popen is
+    replaced with a fake process via the popen_factory parameter."""
+
+    def setup_method(self):
+        self.controller = SlideshowController()
+        os.environ['SDL_VIDEODRIVER'] = 'dummy'
+        pygame.init()
+        pygame.display.set_mode((1, 1))
+
+    def teardown_method(self):
+        pygame.quit()
+
+    def _fake_screen(self, *args, **kwargs):
+        return pygame.display.set_mode((1, 1))
+
+    def test_normal_exit_reinitializes_display(self):
+        fake_proc = Mock()
+        fake_proc.poll.side_effect = [None, None, 0]
+        popen_factory = Mock(return_value=fake_proc)
+
+        with patch("time.sleep"):
+            screen, font, status_font = play_video("clip.mp4", self.controller, popen_factory=popen_factory)
+
+        assert isinstance(screen, pygame.Surface)
+        popen_factory.assert_called_once()
+        args = popen_factory.call_args[0][0]
+        assert args[0] == "mpv"
+        assert args[-1] == "clip.mp4"
+        for flag in MPV_ARGS:
+            assert flag in args
+        fake_proc.terminate.assert_not_called()
+
+    def test_next_command_terminates_mpv_early(self):
+        fake_proc = Mock()
+        fake_proc.poll.return_value = None  # never exits on its own
+        popen_factory = Mock(return_value=fake_proc)
+
+        self.controller.pending_command = {"type": "next", "steps": 1}
+
+        with patch("time.sleep"):
+            play_video("clip.mp4", self.controller, popen_factory=popen_factory)
+
+        fake_proc.terminate.assert_called_once()
+        assert self.controller.pending_command is None
+
+    def test_popen_oserror_still_reinitializes_display(self):
+        popen_factory = Mock(side_effect=OSError("mpv not found"))
+
+        screen, font, status_font = play_video("clip.mp4", self.controller, popen_factory=popen_factory)
+
+        assert isinstance(screen, pygame.Surface)
 
 
 if __name__ == "__main__":
