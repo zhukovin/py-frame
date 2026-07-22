@@ -2,7 +2,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from itertools import islice
-from typing import List, NamedTuple, Tuple, Literal
+from typing import List, Tuple, Literal
 
 import pygame
 from PIL import Image, ImageOps
@@ -25,26 +25,10 @@ logger = logging.getLogger("py_frame")
 ERROR_LOG_FILE = "app_errors.log"
 
 Orientation = Literal["P", "L"]  # P = Portrait, L = Landscape
-MediaKind = Literal["image", "video"]
 
 seconds_to_display = 15
 
 MAX_HISTORY_SCREENS = 5  # or 20, tune as you like
-
-IMAGE_EXTENSIONS = (".jpg", ".jpeg")
-VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".m4v")
-MPV_ARGS = ["--fs", "--no-terminal", "--really-quiet", "--keep-open=no"]
-
-
-class ListEntry(NamedTuple):
-    """One line from the photo list file, classified by extension."""
-    path: str
-    kind: MediaKind
-
-
-def is_mpv_available() -> bool:
-    import shutil
-    return shutil.which("mpv") is not None
 
 
 def log_mem(tag=""):
@@ -133,14 +117,6 @@ class SlideshowController:
 
         # Pending command from web: {"type": "...", "steps": int}
         self.pending_command: Optional[dict] = None
-
-        # Set by the fetcher thread the moment it reaches a video entry in
-        # the file list, and cleared only after that video has finished
-        # playing (or been skipped) -- covers the whole lifetime "a video is
-        # queued or currently playing", not just "currently playing", so the
-        # render loop knows to drain leftover buffered photos without
-        # waiting for a full batch of 5 (see pop_next_screen_from_dq).
-        self.pending_video: Optional[str] = None
 
         # Exclusions
         self.excluded_paths: set[str] = set()
@@ -351,44 +327,6 @@ def extract_pattern_from_deque(dq: deque[Slide]) -> Tuple[List[Slide], int]:
     return extracted, pattern_type
 
 
-def pop_next_screen_from_dq(dq: deque[Slide]) -> Tuple[List[Slide], int]:
-    """
-    Pop one screen's worth off the front of dq: a solo Landscape (pattern
-    type 0), or a full PPP/PPLLL/PLLL pattern via extract_pattern_from_deque.
-
-    Falls back to popping a single slide solo (type 0, any orientation) if
-    the leading entries don't complete a full pattern. That can't happen
-    with a full 5-item window starting with Portrait (classify_pattern_type's
-    thresholds cover every possible split), so in practice the fallback only
-    fires for leftover photos stranded at a video boundary, where fewer than
-    5 may be available and none are coming until the video has played.
-
-    Precondition: dq must be non-empty.
-    """
-    if not dq:
-        raise ValueError("pop_next_screen_from_dq called with an empty dq")
-    if dq[0].orientation == "L":
-        return [dq.popleft()], 0
-    try:
-        return extract_pattern_from_deque(dq)
-    except ValueError:
-        return [dq.popleft()], 0
-
-
-def push_screen_to_history(controller: SlideshowController, slides: List[Slide], pattern_type: int):
-    """
-    Append a completed screen to controller.history, capped at
-    MAX_HISTORY_SCREENS. Shared by the normal forward-advance path and the
-    video-boundary drain path in render_loop.
-    """
-    with controller.lock:
-        if len(controller.history) >= MAX_HISTORY_SCREENS:
-            controller.history.pop(0)
-            controller.history_index = max(0, controller.history_index - 1)
-        controller.history.append((slides, pattern_type))
-        controller.history_index = len(controller.history) - 1
-
-
 # ============================================================
 # Image fetcher thread
 # ============================================================
@@ -456,7 +394,7 @@ def log_load_measurement(log_file: str, path: str, outcome: str, load_bytes: int
 
 
 def image_fetcher_thread(
-        file_paths: list[ListEntry],
+        file_paths: list[str],
         dq: deque[Slide],
         lock: threading.Lock,
         not_full: threading.Condition,
@@ -481,9 +419,9 @@ def image_fetcher_thread(
         n = len(file_paths)
 
         while True:
-            entry = file_paths[idx]
+            path = file_paths[idx]
             idx = (idx + 1) % n
-            path, kind = entry.path, entry.kind
+            # path = random.choice(file_paths)
 
             with controller.lock:
                 if path in controller.excluded_paths:
@@ -492,20 +430,6 @@ def image_fetcher_thread(
                     excluded = False
             if excluded:
                 time.sleep(0.3)
-                continue
-
-            if kind == "video":
-                # Announce the video before waiting on anything, so the
-                # render loop can drop its "wait for 5 buffered photos"
-                # gate immediately instead of deadlocking against this
-                # thread (see pop_next_screen_from_dq / render_loop).
-                with controller.lock:
-                    controller.pending_video = path
-                while True:
-                    with controller.lock:
-                        if controller.pending_video is None:
-                            break
-                    time.sleep(0.2)
                 continue
 
             with not_full:
@@ -1116,92 +1040,6 @@ def downscale_slides_to_screen(slides: list[Slide], max_w: int, max_h: int):
         downscale_slide_to_screen(s, max_w, max_h)
 
 
-def init_pygame_display(font_size: int = 40, status_font_size: int = 46):
-    """
-    (Re)acquire the pygame display and fonts. Called once at startup, and
-    again by play_video() after every video -- mpv needs the framebuffer to
-    itself on the Pi (no window manager to layer through, see play_video),
-    so pygame releases it first and must reacquire it the same way here.
-    """
-    import platform
-
-    pygame.display.init()  # idempotent; required again after display.quit()
-
-    if platform.system() == "Darwin":
-        # On macOS: use a borderless window the size of the main desktop,
-        # so other monitors remain usable.
-        os.environ["SDL_VIDEO_WINDOW_POS"] = "0,0"
-        display_sizes = pygame.display.get_desktop_sizes()
-        main_w, main_h = display_sizes[0]  # assume first is main screen
-        screen = pygame.display.set_mode((main_w, main_h), pygame.NOFRAME)
-    else:
-        # On Pi (and other platforms) keep true fullscreen
-        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-
-    pygame.mouse.set_visible(False)
-    font = pygame.font.SysFont(None, font_size)
-    status_font = pygame.font.SysFont(None, status_font_size)
-    return screen, font, status_font
-
-
-def play_video(path: str, controller: SlideshowController, popen_factory=None):
-    """
-    Play one video full-screen via mpv, blocking the render loop until it
-    finishes (or is skipped).
-
-    The Pi runs pygame directly against the framebuffer with no window
-    manager (SDL_VIDEODRIVER=fbcon, pygame.FULLSCREEN) -- there's no window
-    stacking model for mpv to layer on top of, so pygame must fully release
-    the display before mpv runs and reacquire it afterward via
-    init_pygame_display().
-
-    Polls for exit every 0.2s rather than blocking on proc.wait(), so a
-    "next"/"prev" web command (readable directly off the controller
-    regardless of pygame's display state) can terminate playback early --
-    skip-only, no seek-back to whatever photo preceded the video.
-
-    popen_factory defaults to subprocess.Popen; overridable so tests can
-    inject a fake process instead of actually invoking mpv.
-    """
-    import subprocess
-    import time
-
-    popen_factory = popen_factory or subprocess.Popen
-
-    pygame.display.quit()
-
-    try:
-        proc = popen_factory(["mpv"] + MPV_ARGS + [path],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        logger.error(f"Failed to launch mpv for {path}", exc_info=True)
-        return init_pygame_display()
-
-    try:
-        while proc.poll() is None:
-            with controller.lock:
-                cmd = controller.pending_command
-                skip = cmd is not None and cmd.get("type") in ("next", "prev")
-                if skip:
-                    controller.pending_command = None
-            if skip:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                break
-            time.sleep(0.2)
-    except Exception:
-        logger.error(f"Error while playing video {path}", exc_info=True)
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-    return init_pygame_display()
-
-
 def render_loop(
         dq: deque[Slide],
         lock: threading.Lock,
@@ -1213,9 +1051,29 @@ def render_loop(
         night_end: tuple[int, int] = DEFAULT_NIGHT_END,
 ):
     import time
+    import os
+    import platform
+
+    # Must set env var BEFORE pygame.init()
+    if platform.system() == "Darwin":  # macOS
+        # Put window at top-left of primary display
+        os.environ["SDL_VIDEO_WINDOW_POS"] = "0,0"
 
     pygame.init()
-    screen, font, status_font = init_pygame_display()
+
+    if platform.system() == "Darwin":
+        # On macOS: use a borderless window the size of the main desktop,
+        # so other monitors remain usable.
+        display_sizes = pygame.display.get_desktop_sizes()
+        main_w, main_h = display_sizes[0]  # assume first is main screen
+        screen = pygame.display.set_mode((main_w, main_h), pygame.NOFRAME)
+    else:
+        # On Pi (and other platforms) keep true fullscreen
+        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+
+    pygame.mouse.set_visible(False)
+    font = pygame.font.SysFont(None, 40)
+    status_font = pygame.font.SysFont(None, 46)
     status_box_rect = compute_status_box_rect(screen, status_font)
     # Snapshot of whatever's behind the status text, taken right after each
     # full scene redraw (before the text is drawn). There's no background
@@ -1422,63 +1280,45 @@ def render_loop(
                     current_pattern_type = ptype
 
                 else:
-                    with controller.lock:
-                        pending_video_path = controller.pending_video
-
-                    if pending_video_path is not None:
-                        # A video is queued. Drain whatever photos are
-                        # already buffered -- they were curated to appear
-                        # before it -- one screen at a time, without waiting
-                        # for a full batch of 5 (none more are coming until
-                        # the video has played; see image_fetcher_thread).
-                        # Once the buffer is empty, it's the video's turn.
-                        with not_full:
-                            has_leftover = len(dq) > 0
-                            if has_leftover:
-                                current_slides, current_pattern_type = pop_next_screen_from_dq(dq)
-                                not_full.notify_all()
-
-                        if has_leftover:
-                            if current_slides and current_pattern_type is not None:
-                                push_screen_to_history(controller, current_slides, current_pattern_type)
-                        else:
-                            with controller.lock:
-                                controller.current_slides = []
-                                controller.current_pattern_type = None
-                                controller.current_marks.clear()
-
-                            screen, font, status_font = play_video(pending_video_path, controller)
-                            with controller.lock:
-                                controller.pending_video = None
-                            status_box_rect = compute_status_box_rect(screen, status_font)
-                            clean_status_corner = None
-                            current_slides, current_pattern_type = [], None
-                            time.sleep(0.2)
+                    # need a new pattern from deque
+                    need_more_images = False
+                    with not_full:
+                        if len(dq) == 0 and producer_done.is_set():
+                            running = False
                             continue
-
-                    else:
-                        # need a new pattern from deque
-                        need_more_images = False
-                        with not_full:
-                            if len(dq) == 0 and producer_done.is_set():
-                                running = False
-                                continue
-                            elif len(dq) >= 5:
-                                current_slides, current_pattern_type = pop_next_screen_from_dq(dq)
+                        elif len(dq) >= 5:
+                            first = dq[0]
+                            if first.orientation == "L":
+                                slide = dq.popleft()
                                 not_full.notify_all()
+                                current_slides = [slide]
+                                current_pattern_type = 0
                             else:
-                                # not enough images buffered yet
-                                need_more_images = True
+                                slides, ptype = extract_pattern_from_deque(dq)
+                                not_full.notify_all()
+                                current_slides = slides
+                                current_pattern_type = ptype
+                        else:
+                            # not enough images buffered yet
+                            need_more_images = True
 
-                        if need_more_images:
-                            # Back off briefly instead of busy-spinning the CPU
-                            # while waiting for the fetcher thread to refill the
-                            # buffer (lock already released above).
-                            time.sleep(0.2)
-                            continue
+                    if need_more_images:
+                        # Back off briefly instead of busy-spinning the CPU
+                        # while waiting for the fetcher thread to refill the
+                        # buffer (lock already released above).
+                        time.sleep(0.2)
+                        continue
 
-                        if current_slides and current_pattern_type is not None:
-                            push_screen_to_history(controller, current_slides, current_pattern_type)
+                    if current_slides and current_pattern_type is not None:
+                        with controller.lock:
+                            # Enforce max history size
+                            if len(controller.history) >= MAX_HISTORY_SCREENS:
+                                # Drop the oldest entry
+                                controller.history.pop(0)
+                                # Adjust index because we removed index 0
+                                controller.history_index = max(0, controller.history_index - 1)
+                            controller.history.append((current_slides, current_pattern_type))
+                            controller.history_index = len(controller.history) - 1
 
                 need_to_render = True
 
@@ -1576,40 +1416,35 @@ def render_loop(
 # ============================================================
 
 
-def read_file_list(list_path: str, shuffle: bool = True) -> List[ListEntry]:
+def read_file_list(list_path: str, shuffle: bool = True) -> List[str]:
     """
-    Read the photo/video list file and decide the display order:
+    Read the photo list file and decide the display order:
       shuffle=True  - fully randomize the order (kept entirely in memory;
                        nothing downstream re-reads the source file, so
                        there's no need to persist the shuffled order).
       shuffle=False - keep the file's original relative order, but start
                        from a random point and wrap around.
-
-    Images and videos stay interleaved in whatever order results -- shuffling
-    ListEntry tuples keeps each path paired with its kind automatically.
     """
-    entries: List[ListEntry] = []
+    paths: List[str] = []
     with open(list_path, "r") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            lower = line.lower()
-            if lower.endswith(IMAGE_EXTENSIONS):
-                entries.append(ListEntry(line, "image"))
-            elif lower.endswith(VIDEO_EXTENSIONS):
-                entries.append(ListEntry(line, "video"))
+            # Only keep JPG/JPEG
+            if line.lower().endswith((".jpg", ".jpeg")):
+                paths.append(line)
 
-    if not entries:
-        return entries
+    if not paths:
+        return paths
 
     if shuffle:
-        random.shuffle(entries)
+        random.shuffle(paths)
     else:
-        offset = random.randrange(len(entries))
-        entries = entries[offset:] + entries[:offset]
+        offset = random.randrange(len(paths))
+        paths = paths[offset:] + paths[:offset]
 
-    return entries
+    return paths
 
 
 def main():
@@ -1631,17 +1466,8 @@ def main():
     list_path = sys.argv[1]
     file_paths = read_file_list(list_path, shuffle=controller.shuffle_enabled)
 
-    if not is_mpv_available():
-        video_count = sum(1 for e in file_paths if e.kind == "video")
-        if video_count:
-            logger.warning(
-                f"mpv not found on PATH; skipping {video_count} video entr"
-                f"{'y' if video_count == 1 else 'ies'} from {list_path}"
-            )
-        file_paths = [e for e in file_paths if e.kind != "video"]
-
     if not file_paths:
-        print(f"No supported image/video entries found in {list_path}; nothing to display.")
+        print(f"No .jpg/.jpeg entries found in {list_path}; nothing to display.")
         sys.exit(1)
 
     shared_deque: deque[Slide] = deque()
