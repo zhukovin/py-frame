@@ -10,7 +10,7 @@ that you prefer and put it on the same LAN as the NAS that stores the photos.
 
 ## RPi SSH Authentication
 
-User: pi
+User: pi  
 Pass: pi
 
 ## Testing
@@ -252,6 +252,8 @@ ls nasus/photo/Camera\ Media/Camera\ Irina/20{10,11,12,13,14,15,16,17}/*.{jpg,JP
 ls nasus/photo/Camera\ Media/Camera\ Irina/20{18,19,20,21,22,23,24,25}/*.{jpg,JPG,jpeg,JPEG} >> photo.irina.list
 ```
 
+The list is read from `photo.list` file.
+
 ## Make slideshow start on RPi boot
 
 ### Step 1
@@ -273,7 +275,7 @@ Conflicts=getty@tty1.service
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/py-frame
-ExecStart=/usr/bin/python /home/pi/py-frame/py_frame.py /home/pi/py-frame/photo.irina.list
+ExecStart=/usr/bin/python /home/pi/py-frame/py_frame.py /home/pi/py-frame/photo.list
 
 # Bind the service to the main console (tty1)
 StandardInput=tty
