@@ -669,6 +669,88 @@ def draw_status_overlay(screen: pygame.Surface,
     return box_rect
 
 
+def _tile_mirror_strip(surf: pygame.Surface, scaled: pygame.Surface, flipped: pygame.Surface,
+                        horizontal: bool, near_edge: int, far_edge: int, tile_extent: int,
+                        cross_offset: int):
+    """
+    Fill the gap on one side of `scaled` (e.g. the strip left of a
+    pillarboxed image) by tiling alternating original/flipped copies
+    outward from `near_edge`, so the tile touching the image is always the
+    mirrored one -- continuous with the image at the seam -- and each
+    tile beyond that keeps alternating, like a hall of mirrors.
+
+    horizontal: True to tile left/right (varying x), False to tile
+    up/down (varying y).
+    near_edge: the coordinate (x or y) of the seam against the image.
+    far_edge: the coordinate (x or y) to tile toward (0 for the
+    left/top side, the rect's width/height for the right/bottom side).
+    tile_extent: width (horizontal) or height (vertical) of one tile,
+    i.e. the scaled image's own width/height in that axis.
+    cross_offset: the fixed x (vertical tiling) or y (horizontal tiling)
+    position shared by every tile -- the image's own offset in that axis.
+    """
+    if tile_extent <= 0:
+        return
+    going_negative = far_edge < near_edge
+    pos = near_edge
+    use_flipped = True
+    while (pos > far_edge) if going_negative else (pos < far_edge):
+        tile = flipped if use_flipped else scaled
+        tile_pos = pos - tile_extent if going_negative else pos
+        if horizontal:
+            surf.blit(tile, (tile_pos, cross_offset))
+        else:
+            surf.blit(tile, (cross_offset, tile_pos))
+        pos = pos - tile_extent if going_negative else pos + tile_extent
+        use_flipped = not use_flipped
+
+
+def build_mirror_fill(img: pygame.Surface, rect_size: tuple[int, int]) -> pygame.Surface:
+    """
+    Render one slide's contribution to the blurred background: the image
+    scaled to fit rect_size (the same aspect-preserving fit blit_scaled
+    uses for the sharp image drawn on top), with the surrounding letterbox/
+    pillarbox gap filled by mirroring the image's own edge outward instead
+    of an unrelated stretched copy -- so the background meets the visible
+    image as a continuous reflection, blending far more smoothly once
+    blurred. The two sides of a gap are filled independently, each as a
+    reflection of the edge it's adjacent to.
+    """
+    tw, th = rect_size
+    surf = pygame.Surface((max(tw, 1), max(th, 1))).convert()
+
+    iw, ih = img.get_width(), img.get_height()
+    if iw == 0 or ih == 0 or tw <= 0 or th <= 0:
+        return surf
+
+    scale = min(tw / iw, th / ih)
+    new_w = max(1, int(iw * scale))
+    new_h = max(1, int(ih * scale))
+    scaled = smoothscale_safe(img, (new_w, new_h))
+
+    x = (tw - new_w) // 2
+    y = (th - new_h) // 2
+
+    # Handled independently (not if/elif): float rounding in the scale
+    # calculation above can leave a negligible (<=1px) gap on the "wrong"
+    # axis alongside the real one, so both need filling to avoid an
+    # unfilled sliver -- see build_mirror_fill's tests for the case this
+    # guards against.
+    if new_w < tw:
+        # Pillarboxed: fill the left/right gaps, tiling horizontally.
+        flipped = pygame.transform.flip(scaled, True, False)
+        _tile_mirror_strip(surf, scaled, flipped, True, x, 0, new_w, y)
+        _tile_mirror_strip(surf, scaled, flipped, True, x + new_w, tw, new_w, y)
+    if new_h < th:
+        # Letterboxed: fill the top/bottom gaps, tiling vertically.
+        flipped = pygame.transform.flip(scaled, False, True)
+        _tile_mirror_strip(surf, scaled, flipped, False, y, 0, new_h, x)
+        _tile_mirror_strip(surf, scaled, flipped, False, y + new_h, th, new_h, x)
+
+    surf.blit(scaled, (x, y))
+    return surf
+
+
 def build_blurred_background(screen_size, slide_rects):
     """
     screen_size: (W, H)
@@ -692,17 +774,14 @@ def build_blurred_background(screen_size, slide_rects):
 
     temp.fill(avg_color)
 
-    # IMPORTANT CHANGE:
-    # For the background we stretch images to completely fill their rects
-    # (no aspect ratio preservation), so there are no local "holes".
+    # Each rect's gap (letterbox/pillarbox) is filled with a mirrored
+    # reflection of the image's own edge rather than a stretched copy, so
+    # the background meets the sharp image drawn on top as a continuous
+    # reflection instead of an unrelated derived image.
     for slide_surface, rect in slide_rects:
-        # Stretch to the full rect size
         if rect.width > 0 and rect.height > 0:
-            stretched = smoothscale_safe(
-                slide_surface,
-                (rect.width, rect.height)
-            )
-            temp.blit(stretched, rect.topleft)
+            filled = build_mirror_fill(slide_surface, (rect.width, rect.height))
+            temp.blit(filled, rect.topleft)
 
     # Now blur by downscaling and upscaling
     factor = 8  # tweak for blur strength & performance

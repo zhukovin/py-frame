@@ -27,6 +27,7 @@ from py_frame import (
     ImageDecodeError,
     smoothscale_safe,
     blit_scaled,
+    build_mirror_fill,
     draw_slot_overlay,
     draw_status_overlay,
     compute_status_box_rect,
@@ -439,6 +440,89 @@ class TestBlitScaled:
         
         # Should scale to fit width (200) and maintain aspect ratio
         blit_scaled(surface, img, target_rect)
+
+
+class TestBuildMirrorFill:
+    """Test suite for build_mirror_fill, which fills a slide's letterbox/
+    pillarbox gap with a mirrored reflection of the image's own edge
+    (instead of an unrelated stretched copy), tiled outward for gaps wider
+    than the fitted image itself."""
+
+    def setup_method(self):
+        pygame.init()
+        # .convert() (used internally) requires an active display mode.
+        pygame.display.set_mode((1, 1))
+
+    def teardown_method(self):
+        pygame.quit()
+
+    def test_no_gap_when_aspect_matches(self):
+        """Same aspect ratio as the target -> no gap, just the scaled image"""
+        img = pygame.Surface((40, 20)).convert()
+        img.fill((10, 20, 30))
+
+        result = build_mirror_fill(img, (80, 40))
+
+        assert result.get_size() == (80, 40)
+        assert result.get_at((0, 0))[:3] == (10, 20, 30)
+        assert result.get_at((79, 39))[:3] == (10, 20, 30)
+
+    def test_pillarbox_seam_is_a_continuous_mirror(self):
+        """The column just outside the image's left edge should exactly
+        match the image's own leftmost column -- a seamless reflection,
+        not an arbitrary stretch"""
+        img = pygame.Surface((10, 10)).convert()
+        img.fill((200, 0, 0))
+        for row in range(10):
+            img.set_at((0, row), (0, 0, 200))  # distinct, trackable edge color
+
+        rect_size = (100, 10)  # much wider than the fitted image
+        result = build_mirror_fill(img, rect_size)
+
+        scale = min(rect_size[0] / 10, rect_size[1] / 10)
+        new_w = max(1, int(10 * scale))
+        x = (rect_size[0] - new_w) // 2
+
+        assert result.get_at((x, 5))[:3] == (0, 0, 200)
+        assert result.get_at((x - 1, 5))[:3] == (0, 0, 200)
+
+    def test_letterbox_seam_is_a_continuous_mirror(self):
+        """Same continuity check, but for a vertical (letterboxed) gap"""
+        img = pygame.Surface((10, 10)).convert()
+        img.fill((200, 0, 0))
+        for col in range(10):
+            img.set_at((col, 0), (0, 200, 0))  # distinct top-edge color
+
+        rect_size = (10, 100)  # much taller than the fitted image
+        result = build_mirror_fill(img, rect_size)
+
+        scale = min(rect_size[0] / 10, rect_size[1] / 10)
+        new_h = max(1, int(10 * scale))
+        y = (rect_size[1] - new_h) // 2
+
+        assert result.get_at((5, y))[:3] == (0, 200, 0)
+        assert result.get_at((5, y - 1))[:3] == (0, 200, 0)
+
+    def test_gap_fully_covered_no_background_color_left_showing(self):
+        """Even when the gap is much wider than one tile, tiling should
+        cover it completely rather than leaving a sliver of the base fill
+        color at the outer edge"""
+        img = pygame.Surface((4, 10)).convert()
+        img.fill((123, 45, 67))
+
+        rect_size = (97, 10)  # deliberately not a clean multiple of the tile width
+        result = build_mirror_fill(img, rect_size)
+
+        for px in (0, 1, rect_size[0] - 1, rect_size[0] - 2):
+            assert result.get_at((px, 5))[:3] == (123, 45, 67)
+
+    def test_zero_area_rect_returns_minimal_surface(self):
+        img = pygame.Surface((10, 10)).convert()
+        img.fill((1, 2, 3))
+
+        result = build_mirror_fill(img, (0, 0))
+
+        assert result.get_size() == (1, 1)
 
 
 class TestFormatSpeed:
