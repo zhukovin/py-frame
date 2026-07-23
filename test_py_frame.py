@@ -43,7 +43,8 @@ from py_frame import (
     log_load_measurement,
     setup_logging,
     main,
-    Orientation
+    Orientation,
+    set_hdmi_power,
 )
 
 
@@ -1033,6 +1034,37 @@ class TestDownscaleSlideToScreen:
         # Should remain the same
         assert slide.surface.get_width() == original_w
         assert slide.surface.get_height() == original_h
+
+
+class TestSetHdmiPower:
+    """Test suite for set_hdmi_power, which cuts/restores the physical HDMI
+    signal via vcgencmd so the monitor sleeps itself (distinct from
+    black_screen mode, which just paints black pixels)."""
+
+    def test_on_invokes_vcgencmd_with_1(self):
+        with patch("subprocess.run") as mock_run:
+            set_hdmi_power(True)
+
+        args = mock_run.call_args[0][0]
+        assert args == ["vcgencmd", "display_power", "1"]
+
+    def test_off_invokes_vcgencmd_with_0(self):
+        with patch("subprocess.run") as mock_run:
+            set_hdmi_power(False)
+
+        args = mock_run.call_args[0][0]
+        assert args == ["vcgencmd", "display_power", "0"]
+
+    def test_missing_vcgencmd_does_not_raise(self):
+        """Developing off the Pi (no vcgencmd on PATH) shouldn't crash the
+        render loop over a cosmetic feature -- just log a warning."""
+        with patch("subprocess.run", side_effect=OSError("not found")):
+            set_hdmi_power(True)  # should not raise
+
+    def test_timeout_does_not_raise(self):
+        import subprocess as subprocess_module
+        with patch("subprocess.run", side_effect=subprocess_module.TimeoutExpired(cmd="vcgencmd", timeout=5)):
+            set_hdmi_power(False)  # should not raise
 
 
 class TestReadFileList:

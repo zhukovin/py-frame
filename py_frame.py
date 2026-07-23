@@ -914,6 +914,31 @@ def is_within_night_window(hour: int, minute: int, start: tuple[int, int], end: 
     return now_minutes >= start_minutes or now_minutes < end_minutes
 
 
+def set_hdmi_power(on: bool):
+    """
+    Turn the physical HDMI output on/off via vcgencmd, so the monitor
+    itself loses signal and goes into its own sleep mode -- distinct from
+    black_screen mode, which just paints black pixels while HDMI stays
+    live and the monitor's backlight stays on.
+
+    Best-effort: logs a warning and does nothing if vcgencmd isn't
+    available (e.g. developing off the Pi) rather than crashing the
+    render loop over a cosmetic feature.
+    """
+    import subprocess
+    try:
+        subprocess.run(
+            ["vcgencmd", "display_power", "1" if on else "0"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.warning(
+            f"Could not set HDMI power {'on' if on else 'off'} via vcgencmd",
+            exc_info=True,
+        )
+
+
 def reclassify_pattern_type(slides: List[Slide], original_ptype: int) -> Optional[int]:
     """
     Decide how a history entry should be classified after some of its slides
@@ -1115,11 +1140,13 @@ def render_loop(
                 with controller.lock:
                     controller.black_screen = True
                     controller.paused = True
+                set_hdmi_power(False)
             else:
                 # Leaving night: auto screen_on + resume
                 with controller.lock:
                     controller.black_screen = False
                     controller.paused = False
+                set_hdmi_power(True)
             prev_is_night = is_night
 
         # --- Handle keyboard / ESC ---
@@ -1171,12 +1198,14 @@ def render_loop(
                     controller.paused = True
                 black_screen = True
                 paused = True
+                set_hdmi_power(False)
             elif ctype == "screen_on":
                 with controller.lock:
                     controller.black_screen = False
                     controller.paused = False
                 black_screen = False
                 paused = False
+                set_hdmi_power(True)
 
         # --- Decide if slideshow should advance ---
         need_advance = False
