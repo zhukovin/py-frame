@@ -1378,6 +1378,12 @@ def render_loop(
                     hist_len = len(controller.history)
                     idx = controller.history_index
 
+                # Freshly initialized every iteration (not left over from a
+                # prior one) so the "skip render, stay stalled" trailer
+                # below only ever applies to the actual stall case, not the
+                # history-replay branch.
+                need_more_images = False
+
                 if hist_len > 0 and 0 <= idx < hist_len - 1:
                     new_index = min(hist_len - 1, idx + steps)
                     with controller.lock:
@@ -1389,7 +1395,6 @@ def render_loop(
 
                 else:
                     # need a new pattern from deque
-                    need_more_images = False
                     with not_full:
                         if len(dq) == 0 and producer_done.is_set():
                             running = False
@@ -1413,43 +1418,52 @@ def render_loop(
                     if need_more_images:
                         # Back off briefly instead of busy-spinning the CPU
                         # while waiting for the fetcher thread to refill the
-                        # buffer (lock already released above).
+                        # buffer (lock already released above). Deliberately
+                        # NOT `continue`-ing here (as this used to): that
+                        # jumped straight back to the top of the outer loop,
+                        # skipping the status-corner refresh further below
+                        # for as long as the stall lasted -- so a stalled/
+                        # disconnected drive never showed "Drive:
+                        # DISCONNECTED" on screen during an outage, it just
+                        # silently froze on the last photo. need_more_images
+                        # is checked below instead, so the status refresh
+                        # still runs every iteration even while stalled.
                         time.sleep(0.2)
-                        continue
-
-                    if current_slides and current_pattern_type is not None:
-                        with controller.lock:
-                            # Enforce max history size
-                            if len(controller.history) >= MAX_HISTORY_SCREENS:
-                                # Drop the oldest entry
-                                controller.history.pop(0)
-                                # Adjust index because we removed index 0
-                                controller.history_index = max(0, controller.history_index - 1)
-                            controller.history.append((current_slides, current_pattern_type))
-                            controller.history_index = len(controller.history) - 1
-
-                need_to_render = True
-
-                # --- Build blurred background for new screen ---
-                if current_slides and current_pattern_type is not None:
-                    screen_w, screen_h = screen.get_size()
-                    downscale_slides_to_screen(current_slides, screen_w, screen_h)
-
-                    if current_pattern_type == 0:
-                        rects = [(current_slides[0].surface, screen.get_rect())]
                     else:
-                        rects = compute_pattern_rects(
-                            screen, current_slides, current_pattern_type
+                        if current_slides and current_pattern_type is not None:
+                            with controller.lock:
+                                # Enforce max history size
+                                if len(controller.history) >= MAX_HISTORY_SCREENS:
+                                    # Drop the oldest entry
+                                    controller.history.pop(0)
+                                    # Adjust index because we removed index 0
+                                    controller.history_index = max(0, controller.history_index - 1)
+                                controller.history.append((current_slides, current_pattern_type))
+                                controller.history_index = len(controller.history) - 1
+
+                if not need_more_images:
+                    need_to_render = True
+
+                    # --- Build blurred background for new screen ---
+                    if current_slides and current_pattern_type is not None:
+                        screen_w, screen_h = screen.get_size()
+                        downscale_slides_to_screen(current_slides, screen_w, screen_h)
+
+                        if current_pattern_type == 0:
+                            rects = [(current_slides[0].surface, screen.get_rect())]
+                        else:
+                            rects = compute_pattern_rects(
+                                screen, current_slides, current_pattern_type
+                            )
+
+                        current_background = build_blurred_background(
+                            screen.get_size(), rects
                         )
+                        current_end_time = now + seconds_to_display
 
-                    current_background = build_blurred_background(
-                        screen.get_size(), rects
-                    )
-                    current_end_time = now + seconds_to_display
-
-                    with controller.lock:
-                        controller.current_slides = current_slides
-                        controller.current_pattern_type = current_pattern_type
+                        with controller.lock:
+                            controller.current_slides = current_slides
+                            controller.current_pattern_type = current_pattern_type
 
         # --- Render only when needed ---
         if need_to_render:
